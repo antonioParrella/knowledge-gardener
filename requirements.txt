@@ -1,0 +1,5 @@
+google-genai
+watchdog
+PyYAML
+requests
+python-dotenv
