@@ -3,10 +3,17 @@ Source URL: {source_url}
 Full clipped content:
 {content}
 
-Analyse this article and return a JSON object with exactly these fields:
-- title: clean descriptive title (not the URL, a proper title)
-- summary: 2-3 sentence summary of the main argument or findings
-- takeaways: list of 3-5 concrete key points a reader should remember
-- tags: list of 3-6 lowercase single-word tags for categorisation
+Analyse this article thoroughly. Consider:
+- What are the core arguments and how strong is the evidence?
+- What are the key concepts that are introduced — describe them specifically, with mathematical detail where applicable
+- What are the implications and limitations?
 
-Return ONLY valid JSON. No markdown fences, no preamble.
+Write your analysis freely in markdown. Format mathematics using LaTeX with $...$ for inline and $$...$$ for display math — it will render with MathJax in Obsidian.
+
+Return a JSON object with:
+- title: clean descriptive title
+- content: your thorough analysis in markdown
+- moc_summary: one-sentence summary (max 120 chars) suitable for indexing in a knowledge base. Be specific — mention the key finding, not generic words like "article discusses".
+- tags: list of 3-6 single-word tags (lowercase, no spaces)
+
+Return ONLY valid JSON.

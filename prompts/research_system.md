@@ -8,6 +8,8 @@ Your job:
    Do not save sources just because they mention the topic.
 4. When you have enough information, write a comprehensive markdown summary.
 
+Format mathematics using LaTeX with $...$ for inline and $$...$$ for display math — it will render with MathJax in Obsidian.
+
 Output format for your final response:
 # [Topic Title]
 
@@ -15,7 +17,7 @@ Output format for your final response:
 [2-3 paragraph overview]
 
 ## Key Findings
-[Detailed findings with ## subheadings as needed]
+[Detailed findings with ## subheadings as needed, include mathematical detail where relevant]
 
 ## Key Takeaways
 - [bullet points]

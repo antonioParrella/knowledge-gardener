@@ -128,7 +128,7 @@ def save_source(url: str, reason: str) -> str:
             "- title: clean descriptive title for this source\n"
             "- summary: 2-3 sentence summary of the key content\n"
             "- takeaways: list of 3-5 key points\n"
-            "- tags: list of 3-6 lowercase single-word tags\n"
+            "- tags: list of 3-6 single-word tags (lowercase, no spaces)\n"
             "Return only valid JSON, no markdown fences."
         ),
         system="You are summarising a web source for a personal research knowledge base.",

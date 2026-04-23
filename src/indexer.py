@@ -82,8 +82,7 @@ def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):
     # Add entry if not already present
     link = f"[[{note_path.stem}]]"
     if link not in body:
-        short_summary = summary[:250].strip().rstrip(".")
-        entry = f"- {link} — {short_summary}\n"
+        entry = f"- {link} — {summary}\n"
 
         if "## Notes\n" in body:
             body = body.replace("## Notes\n", f"## Notes\n{entry}")
@@ -98,7 +97,7 @@ def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):
     # Update master index
     _update_master_index(moc_topic)
 
-    print(f"[index] '{note_title}' → MOC - {moc_topic} ({fm['note_count']} notes)")
+    print(f"[index] '{note_title}' -> MOC - {moc_topic} ({fm['note_count']} notes)")
 
 
 def _update_master_index(moc_topic: str):

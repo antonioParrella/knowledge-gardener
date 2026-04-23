@@ -1,3 +1,1 @@
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location "$ScriptDir\src"
-..\venv\Scripts\python.exe obsidian_watchdog.py
+& "$PSScriptRoot\venv\Scripts\python.exe" "$PSScriptRoot\src\obsidian_watchdog.py"

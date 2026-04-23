@@ -50,7 +50,8 @@ def gemini_simple(prompt: str, system: str = "") -> str:
                     print(f"[gemini] Rate limited, waiting {wait}s...")
                     time.sleep(wait)
                 else:
-                    continue
+                    print(f"[gemini] Error with {model_name}: {e}")
+                    break
     raise RuntimeError("Gemini simple call failed after retries.")
 
 

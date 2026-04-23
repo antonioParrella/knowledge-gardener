@@ -26,9 +26,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # Models to try in order if rate limits are hit
 GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemma-4-31b-it",
 ]
 
 # ── Research settings ─────────────────────────────────────────────────────────

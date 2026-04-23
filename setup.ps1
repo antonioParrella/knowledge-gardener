@@ -1,5 +1,4 @@
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $ScriptDir
+$ScriptDir = $PSScriptRoot
 
 if (-not (Test-Path "venv")) {
     Write-Host "Creating virtual environment..."

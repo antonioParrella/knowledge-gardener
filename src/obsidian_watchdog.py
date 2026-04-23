@@ -27,7 +27,7 @@ from config import (
     VAULT_PATH, INBOX_PATH, TRIGGERS_PATH, ALL_PATHS,
     ICLOUD_SETTLE_SECS, WATCH_RECURSIVE, GEMINI_API_KEY
 )
-from clipper import process_clipped_note
+from clipper import process_clipped_note, find_unprocessed_clips
 from researcher import process_research_trigger
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -58,6 +58,17 @@ def startup_checks():
     for path in ALL_PATHS:
         path.mkdir(parents=True, exist_ok=True)
         log.info(f"Ready: {path.relative_to(VAULT_PATH)}/")
+
+    # Process any unprocessed clips from previous sessions
+    unprocessed = find_unprocessed_clips(INBOX_PATH)
+    if unprocessed:
+        log.info(f"Found {len(unprocessed)} unprocessed clip(s) from previous sessions")
+        for path in unprocessed:
+            try:
+                log.info(f"Processing backlog: {path.name}")
+                process_clipped_note(path)
+            except Exception as e:
+                log.error(f"Error processing backlog {path.name}: {e}")
 
 
 # ── File event handler ────────────────────────────────────────────────────────

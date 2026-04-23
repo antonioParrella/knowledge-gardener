@@ -5,9 +5,8 @@ When the watchdog detects a new note in Inbox/ with clipped: true and
 processed: false, this module:
   1. Reads the clipped content
   2. Asks Gemini to summarise, extract takeaways and tags
-  3. Rewrites the note with the enriched content
-  4. Renames the note to a clean title
-  5. Indexes the note into the knowledge base MOCs
+  3. Saves the summary to a separate note alongside the original
+  4. Indexes into the knowledge base MOCs
 """
 
 import re
@@ -17,6 +16,56 @@ from config import CLIP_CONTENT_LIMIT, load_prompt
 from notes import read_note, write_note, safe_filename, today
 from gemini_client import gemini_simple, parse_json_response
 from indexer import index_note
+
+
+def find_unprocessed_clips(inbox_path: Path):
+    """Find all unprocessed clips in the Inbox."""
+    unprocessed = []
+    if not inbox_path.exists():
+        return unprocessed
+
+    for md_file in inbox_path.glob("*.md"):
+        try:
+            fm, _ = read_note(md_file)
+            clipped = str(fm.get("clipped", "")).lower()
+            processed = fm.get("processed", False)
+            if clipped == "true" and processed != True:
+                unprocessed.append(md_file)
+        except Exception:
+            continue
+
+    return unprocessed
+
+
+def reset_clips(inbox_path: Path, dry_run: bool = False):
+    """
+    Delete summary notes so clips can be re-summarised.
+    Leaves the original clip untouched.
+    Pass dry_run=True to preview without making changes.
+    """
+    count = 0
+    if not inbox_path.exists():
+        return count
+
+    for md_file in inbox_path.glob("*.md"):
+        try:
+            fm, _ = read_note(md_file)
+            if str(fm.get("clipped", "")).lower() == "true" and fm.get("processed") == True:
+                if dry_run:
+                    print(f"[clip] Would delete summary: {md_file.name}")
+                else:
+                    summary_path = md_file.parent / f"{md_file.stem} - Summary.md"
+                    if summary_path.exists():
+                        summary_path.unlink()
+                    fm["processed"] = False
+                    fm.pop("processed_date", None)
+                    write_note(md_file, fm, None)
+                    print(f"[clip] Reset: {md_file.name}")
+                count += 1
+        except Exception:
+            continue
+
+    return count
 
 
 def process_clipped_note(path: Path):
@@ -30,22 +79,19 @@ def process_clipped_note(path: Path):
         print(f"[clip] Could not read {path.name}: {e}")
         return
 
-    # Guard: only process unhandled clips
-    if fm.get("clipped") == "false":
-        return
-    if fm.get("processed") == "true":
+    clipped = str(fm.get("clipped", "")).lower()
+    processed = fm.get("processed", False)
+    if clipped != "true" or processed == True:
         return
 
     print(f"[clip] Processing: {path.name}")
 
-    # Truncate to avoid token overload
     content = body[:CLIP_CONTENT_LIMIT]
     source_url = fm.get("source", "unknown")
 
-    # Ask Gemini to analyse the content
     system_prompt = load_prompt("clip_system")
     user_prompt = load_prompt("clip_analysis", source_url=source_url, content=content)
-    
+
     result_text = gemini_simple(
         prompt=user_prompt,
         system=system_prompt,
@@ -57,41 +103,50 @@ def process_clipped_note(path: Path):
         data = {
             "title": path.stem,
             "summary": "Could not summarise — see original content below.",
-            "takeaways": [],
+            "key_findings": [],
             "tags": [],
         }
 
-    # Build enriched note body
-    takeaways_md = "\n".join(f"- {t}" for t in data.get("takeaways", []))
-    new_body = (
-        f"## Summary\n{data.get('summary', '')}\n\n"
-        f"## Key Takeaways\n{takeaways_md}\n\n"
-        f"## Original Content\n{body}\n"
-    )
+    summary_title = data.get("title", path.stem)
+    clean_title = safe_filename(summary_title)
 
-    # Update frontmatter
-    fm["processed"] = True
-    fm["tags"] = data.get("tags", [])
-    fm["title"] = data.get("title", path.stem)
-    fm["processed_date"] = today()
+    tags = data.get("tags", [])
+    analysis = data.get("content") or data.get("summary") or ""
+    moc_summary = data.get("moc_summary") or ""
 
-    write_note(path, fm, new_body)
-
-    # Rename to clean title
-    clean_title = safe_filename(data.get("title", path.stem))
-    if clean_title and clean_title != path.stem:
+    if clean_title != path.stem:
         new_path = path.parent / f"{clean_title}.md"
         if not new_path.exists():
             path.rename(new_path)
             path = new_path
-            print(f"[clip] Renamed to: {clean_title}.md")
 
-    # Index into knowledge base
+    summary_body = f"{analysis}\n\n---\n\n## Original Content\n\n{body}"
+
+    fm["processed"] = True
+    fm["processed_date"] = today()
+    if tags:
+        fm["tags"] = tags
+
+    write_note(path, fm, summary_body)
+
     index_note(
         note_title=path.stem,
         note_path=path,
-        summary=data.get("summary", ""),
-        tags=data.get("tags", []),
+        summary=moc_summary,
+        tags=tags,
     )
 
     print(f"[clip] Done: {path.stem}")
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    from config import INBOX_PATH
+
+    args = set(sys.argv[1:])
+    dry_run = "--dry-run" in args or "-n" in args
+
+    count = reset_clips(INBOX_PATH, dry_run=dry_run)
+    action = "Would reset" if dry_run else "Reset"
+    print(f"{action} {count} clip(s)")
