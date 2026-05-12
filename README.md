@@ -39,3 +39,34 @@ MyVault/
 
 - **Clip pipeline**: Clip a page → agent summarises → indexes into MOC
 - **Research pipeline**: Create trigger note → agent researches → writes summary → indexes into MOC
+
+## Resetting Clips
+
+Revert processed clips to their original content and clean up MOC/index references:
+
+```bash
+python src/reset_clips.py              # reset all processed clips
+python src/reset_clips.py --dry-run    # preview without changes
+```
+
+This extracts everything after the `## Original Content` header, resets the `processed` flag, removes agent-assigned tags, and surgically cleans up MOC entries (leaving research/source entries untouched).
+
+## Vault Health
+
+```bash
+python src/lint.py           # check for duplicate sources, broken frontmatter, orphan links, etc.
+python src/lint.py --fix     # auto-fix what can be fixed (deletes dupes, removes dead links)
+python src/lint.py --quiet   # quiet mode for scheduled runs (Task Scheduler)
+```
+
+Zero Gemini cost — just reads markdown files in the vault.
+
+## Vault Health
+
+```bash
+python src/lint.py           # check for duplicate sources, broken frontmatter, orphan links, etc.
+python src/lint.py --fix     # auto-fix what can be fixed (deletes dupes, removes dead links)
+python src/lint.py --quiet   # quiet mode for scheduled runs (Task Scheduler)
+```
+
+Zero Gemini cost — just reads markdown files in the vault.

@@ -3,3 +3,4 @@ watchdog
 PyYAML
 requests
 python-dotenv
+pymupdf

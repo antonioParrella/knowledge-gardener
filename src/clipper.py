@@ -12,10 +12,30 @@ processed: false, this module:
 import re
 from pathlib import Path
 
-from config import CLIP_CONTENT_LIMIT, load_prompt
+from config import CLIP_CONTENT_LIMIT, VAULT_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
 from notes import read_note, write_note, safe_filename, today
 from gemini_client import gemini_simple, parse_json_response
 from indexer import index_note
+
+
+def _find_existing_source(source_url: str) -> Path | None:
+    """
+    Check if any existing note in Clippings/ or Sources/ already has this source URL.
+    Returns the existing note's path if found, None otherwise.
+    """
+    if not source_url or source_url == "unknown":
+        return None
+    for folder in (INBOX_PATH, SOURCES_PATH):
+        if not folder.exists():
+            continue
+        for md_file in folder.glob("*.md"):
+            try:
+                fm, _ = read_note(md_file)
+                if fm.get("source", "").strip() == source_url:
+                    return md_file
+            except Exception:
+                continue
+    return None
 
 
 def find_unprocessed_clips(inbox_path: Path):
@@ -27,9 +47,7 @@ def find_unprocessed_clips(inbox_path: Path):
     for md_file in inbox_path.glob("*.md"):
         try:
             fm, _ = read_note(md_file)
-            clipped = str(fm.get("clipped", "")).lower()
-            processed = fm.get("processed", False)
-            if clipped == "true" and processed != True:
+            if fm.get("processed") is not True:
                 unprocessed.append(md_file)
         except Exception:
             continue
@@ -50,7 +68,7 @@ def reset_clips(inbox_path: Path, dry_run: bool = False):
     for md_file in inbox_path.glob("*.md"):
         try:
             fm, _ = read_note(md_file)
-            if str(fm.get("clipped", "")).lower() == "true" and fm.get("processed") == True:
+            if fm.get("processed") == True:
                 if dry_run:
                     print(f"[clip] Would delete summary: {md_file.name}")
                 else:
@@ -79,15 +97,22 @@ def process_clipped_note(path: Path):
         print(f"[clip] Could not read {path.name}: {e}")
         return
 
-    clipped = str(fm.get("clipped", "")).lower()
-    processed = fm.get("processed", False)
-    if clipped != "true" or processed == True:
+    if fm.get("processed") is True:
+        return
+
+    source_url = fm.get("source", "unknown")
+    existing = _find_existing_source(source_url)
+    if existing and existing != path:
+        print(f"[clip] SKIP: duplicate source URL — already in {existing.stem}")
+        fm["processed"] = True
+        fm["processed_date"] = today()
+        fm["duplicate_of"] = str(existing.relative_to(VAULT_PATH))
+        write_note(path, fm, body)
         return
 
     print(f"[clip] Processing: {path.name}")
 
     content = body[:CLIP_CONTENT_LIMIT]
-    source_url = fm.get("source", "unknown")
 
     system_prompt = load_prompt("clip_system")
     user_prompt = load_prompt("clip_analysis", source_url=source_url, content=content)
@@ -99,13 +124,8 @@ def process_clipped_note(path: Path):
 
     data = parse_json_response(result_text)
     if not data:
-        print(f"[clip] JSON parse failed for {path.name}, using fallback.")
-        data = {
-            "title": path.stem,
-            "summary": "Could not summarise — see original content below.",
-            "key_findings": [],
-            "tags": [],
-        }
+        print(f"[clip] JSON parse failed for {path.name}, leaving original untouched.")
+        return
 
     summary_title = data.get("title", path.stem)
     clean_title = safe_filename(summary_title)

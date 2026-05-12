@@ -25,10 +25,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
     VAULT_PATH, INBOX_PATH, TRIGGERS_PATH, ALL_PATHS,
-    ICLOUD_SETTLE_SECS, WATCH_RECURSIVE, GEMINI_API_KEY
+    ICLOUD_SETTLE_SECS, WATCH_RECURSIVE, GEMINI_API_KEY, RESCAN_INTERVAL_SECS,
+    PDF_INBOX_PATH, PDF_ARCHIVE_PATH,
 )
 from clipper import process_clipped_note, find_unprocessed_clips
 from researcher import process_research_trigger
+from pdf_processor import process_pdf, find_unprocessed_pdfs
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -59,7 +61,11 @@ def startup_checks():
         path.mkdir(parents=True, exist_ok=True)
         log.info(f"Ready: {path.relative_to(VAULT_PATH)}/")
 
-    # Process any unprocessed clips from previous sessions
+    PDF_INBOX_PATH.mkdir(parents=True, exist_ok=True)
+    PDF_ARCHIVE_PATH.mkdir(parents=True, exist_ok=True)
+    log.info(f"Ready: {PDF_INBOX_PATH}/")
+
+    # Process any backlog from previous sessions
     unprocessed = find_unprocessed_clips(INBOX_PATH)
     if unprocessed:
         log.info(f"Found {len(unprocessed)} unprocessed clip(s) from previous sessions")
@@ -67,6 +73,16 @@ def startup_checks():
             try:
                 log.info(f"Processing backlog: {path.name}")
                 process_clipped_note(path)
+            except Exception as e:
+                log.error(f"Error processing backlog {path.name}: {e}")
+
+    unprocessed_pdfs = find_unprocessed_pdfs(PDF_INBOX_PATH)
+    if unprocessed_pdfs:
+        log.info(f"Found {len(unprocessed_pdfs)} unprocessed PDF(s) from previous sessions")
+        for path in unprocessed_pdfs:
+            try:
+                log.info(f"Processing backlog: {path.name}")
+                process_pdf(path)
             except Exception as e:
                 log.error(f"Error processing backlog {path.name}: {e}")
 
@@ -86,7 +102,7 @@ class VaultHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         path = Path(event.src_path)
-        if path.suffix.lower() != ".md":
+        if path.suffix.lower() not in (".md", ".pdf"):
             return
         if path in self._processing:
             return
@@ -109,11 +125,15 @@ class VaultHandler(FileSystemEventHandler):
             self._processing.discard(path)
 
     def _route(self, path: Path):
-        """Route a new note to the appropriate pipeline."""
+        """Route a new file to the appropriate pipeline."""
         try:
             parents = set(path.parents)
 
-            if INBOX_PATH in parents:
+            if path.suffix.lower() == ".pdf" and path.parent == PDF_INBOX_PATH:
+                log.info(f"New PDF detected: {path.name}")
+                process_pdf(path)
+
+            elif INBOX_PATH in parents:
                 log.info(f"New clip detected: {path.name}")
                 process_clipped_note(path)
 
@@ -136,17 +156,37 @@ def main():
     log.info("Watching for:")
     log.info(f"  Clips    → {INBOX_PATH.relative_to(VAULT_PATH)}/")
     log.info(f"  Research → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/")
+    log.info(f"  PDFs     → {PDF_INBOX_PATH}/")
     log.info("Press Ctrl+C to stop.")
     log.info("=" * 60)
 
     handler = VaultHandler()
     observer = Observer()
     observer.schedule(handler, str(VAULT_PATH), recursive=WATCH_RECURSIVE)
+    observer.schedule(handler, str(PDF_INBOX_PATH), recursive=False)
     observer.start()
 
+    last_rescan = time.time()
     try:
         while True:
             time.sleep(1)
+            
+            # Periodic re-scan for new files (iCloud doesn't fire events reliably)
+            if time.time() - last_rescan >= RESCAN_INTERVAL_SECS:
+                last_rescan = time.time()
+                log.info("Periodic re-scan...")
+                for path in find_unprocessed_clips(INBOX_PATH):
+                    try:
+                        log.info(f"Processing: {path.name}")
+                        process_clipped_note(path)
+                    except Exception as e:
+                        log.error(f"Error processing {path.name}: {e}")
+                for path in find_unprocessed_pdfs(PDF_INBOX_PATH):
+                    try:
+                        log.info(f"Processing: {path.name}")
+                        process_pdf(path)
+                    except Exception as e:
+                        log.error(f"Error processing {path.name}: {e}")
     except KeyboardInterrupt:
         log.info("Stopping...")
         observer.stop()

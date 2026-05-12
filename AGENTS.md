@@ -68,15 +68,40 @@ MyVault/
 
 ```
 obsidian_system/
+├── prompts/
+│   ├── clip_system.md      ← System prompt for clip processing
+│   ├── clip_analysis.md    ← User prompt template for clip analysis
+│   └── research_system.md  ← System prompt for agentic research
 └── src/
-    ├── config.py          ← All settings (edit VAULT_PATH here)
-    ├── notes.py           ← Read/write markdown note helpers
-    ├── gemini_client.py   ← Gemini API wrapper with fallback + retry
-    ├── indexer.py         ← MOC creation and maintenance
-    ├── web_tools.py       ← search_web, fetch_url, save_source tools
-    ├── clipper.py         ← Web Clipper note processing pipeline
-    ├── researcher.py      ← Agentic research pipeline
-    └── watchdog.py        ← Main entry point, file system monitor
+    ├── config.py            ← All settings (edit VAULT_PATH here)
+    ├── notes.py             ← Read/write markdown note helpers
+    ├── gemini_client.py     ← Gemini API wrapper with fallback + retry
+    ├── indexer.py           ← MOC creation and maintenance
+    ├── web_tools.py         ← search_web, fetch_url, save_source tools
+    ├── clipper.py           ← Web Clipper note processing pipeline
+    ├── researcher.py        ← Agentic research pipeline
+    ├── pdf_processor.py     ← PDF text extraction + summarisation
+    ├── obsidian_watchdog.py ← Main entry point, file system monitor
+    ├── reset_clips.py       ← Standalone script to revert clips to original
+    └── lint.py              ← Vault health checker (run periodically)
+```
+obsidian_system/
+├── prompts/
+│   ├── clip_system.md      ← System prompt for clip processing
+│   ├── clip_analysis.md    ← User prompt template for clip analysis
+│   └── research_system.md  ← System prompt for agentic research
+└── src/
+    ├── config.py            ← All settings (edit VAULT_PATH here)
+    ├── notes.py             ← Read/write markdown note helpers
+    ├── gemini_client.py     ← Gemini API wrapper with fallback + retry
+    ├── indexer.py           ← MOC creation and maintenance
+    ├── web_tools.py         ← search_web, fetch_url, save_source tools
+    ├── clipper.py           ← Web Clipper note processing pipeline
+    ├── researcher.py        ← Agentic research pipeline
+    ├── pdf_processor.py     ← PDF text extraction + summarisation
+    ├── obsidian_watchdog.py ← Main entry point, file system monitor
+    ├── reset_clips.py       ← Standalone script to revert clips to original
+    └── lint.py              ← Vault health checker (run periodically)
 ```
 
 ---
@@ -93,13 +118,14 @@ obsidian_system/
       source: "https://..."
 3. iCloud syncs to Surface
 4. watchdog.py detects new file in Inbox/
-5. clipper.py reads the content
-6. Gemini returns: title, summary, takeaways, tags (as JSON)
-7. Note is rewritten with Summary + Key Takeaways sections
-8. Note is renamed to the clean title
-9. indexer.py assigns it to a MOC (or creates one)
-10. MOC - Topic.md is updated with a link and one-line description
-11. _index.md is updated if a new MOC was created
+5. clipper.py checks for duplicate source URLs (skips if already in vault)
+6. clipper.py reads the content
+7. Gemini returns: title, summary, takeaways, tags (as JSON)
+8. Note is rewritten with Summary + Key Takeaways sections
+9. Note is renamed to the clean title
+10. indexer.py assigns it to a MOC (or creates one)
+11. MOC - Topic.md is updated with a link and one-line description
+12. _index.md is updated if a new MOC was created
 ```
 
 ### Research Pipeline
@@ -126,6 +152,23 @@ obsidian_system/
 9. Trigger note marked research: done
 ```
 
+### Reset Clips
+
+```
+python src/reset_clips.py                  # reset all processed clips
+python src/reset_clips.py --dry-run        # preview without changes
+```
+
+Reverses the clip pipeline for all processed clips in Clippings/:
+1. Finds notes with `processed: true`
+2. Extracts original content from after the `## Original Content` header
+3. Resets frontmatter: `processed: false`, removes `tags` and `processed_date`
+4. Surgically removes clip entries from MOCs, decrementing `note_count`
+5. Deletes MOCs that drop to 0 entries and cleans up `_index.md`
+
+Skipped clips (no `## Original Content` header) and non-clip entries in MOCs
+(research notes, sources) are left untouched.
+
 ### save_source (new in v3)
 
 During research, Gemini has access to a third tool: `save_source(url, reason)`.
@@ -139,6 +182,66 @@ Your script then:
 - Indexes it into the same MOC system as clipped notes
 
 Capped at 5 saves per research run to prevent the agent saving everything.
+
+### Vault Linting
+
+```
+python src/lint.py           # full report to console
+python src/lint.py --quiet   # only print if issues found (for scheduled runs)
+python src/lint.py --fix     # auto-fix what can be fixed
+```
+
+Scans the vault for common issues without using the Gemini API. Detects:
+1. **Duplicate source URLs** — Multiple notes in Clippings/ or Sources/ with the same `source`
+2. **Broken YAML frontmatter** — Notes with malformed or unparseable frontmatter
+3. **MOC note_count mismatch** — Frontmatter count doesn't match actual `[[links]]`
+4. **Orphan wikilinks** — `[[Some Note]]` in a MOC with no matching .md file anywhere
+5. **Duplicate MOC entries** — Same `[[link]]` listed twice in one MOC
+8. **Empty body notes** — Notes with no content after frontmatter
+9. **Stale _index.md references** — Index points to MOCs that don't exist
+
+`--fix` automatically resolves checks 1, 3, 4, 5, and 9:
+| Check | Fix action |
+|-------|-----------|
+| Duplicate sources | Deletes the lesser copy (iCloud ghost > "Copy" > unprocessed > newest) |
+| Orphan wikilinks | Removes dead `[[link]]` from MOC, decrements `note_count` |
+| MOC note_count | Updates frontmatter to match actual count |
+| Stale _index.md | Removes dead MOC references |
+| Duplicate MOC entries | Deduplicates, updates `note_count` |
+
+### Inline Duplicate Prevention
+
+`clipper.py` now checks for existing notes with the same `source` URL before processing a new clip. If found, the duplicate is marked `processed: true` with a `duplicate_of` field, and no Gemini call is wasted.
+
+### Vault Linting
+
+```
+python src/lint.py           # full report to console
+python src/lint.py --quiet   # only print if issues found (for scheduled runs)
+python src/lint.py --fix     # auto-fix what can be fixed
+```
+
+Scans the vault for common issues without using the Gemini API. Detects:
+1. **Duplicate source URLs** — Multiple notes in Clippings/ or Sources/ with the same `source`
+2. **Broken YAML frontmatter** — Notes with malformed or unparseable frontmatter
+3. **MOC note_count mismatch** — Frontmatter count doesn't match actual `[[links]]`
+4. **Orphan wikilinks** — `[[Some Note]]` in a MOC with no matching .md file anywhere
+5. **Duplicate MOC entries** — Same `[[link]]` listed twice in one MOC
+8. **Empty body notes** — Notes with no content after frontmatter
+9. **Stale _index.md references** — Index points to MOCs that don't exist
+
+`--fix` automatically resolves checks 1, 3, 4, 5, and 9:
+| Check | Fix action |
+|-------|-----------|
+| Duplicate sources | Deletes the lesser copy (iCloud ghost > "Copy" > unprocessed > newest) |
+| Orphan wikilinks | Removes dead `[[link]]` from MOC, decrements `note_count` |
+| MOC note_count | Updates frontmatter to match actual count |
+| Stale _index.md | Removes dead MOC references |
+| Duplicate MOC entries | Deduplicates, updates `note_count` |
+
+### Inline Duplicate Prevention
+
+`clipper.py` now checks for existing notes with the same `source` URL before processing a new clip. If found, the duplicate is marked `processed: true` with a `duplicate_of` field, and no Gemini call is wasted.
 
 ---
 

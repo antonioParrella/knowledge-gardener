@@ -21,6 +21,12 @@ TRIGGERS_PATH = VAULT_PATH / "_triggers"  # iPhone research trigger notes
 
 ALL_PATHS = [INBOX_PATH, RESEARCH_PATH, INDEX_PATH, SOURCES_PATH, TRIGGERS_PATH]
 
+# ── PDF paths ─────────────────────────────────────────────────────────────────
+# Drop PDFs here from iPhone or Surface — iCloud synced but outside the vault
+PDF_INBOX_PATH = Path(r"C:\Users\parre\iCloudDrive\PDF Inbox")
+# Processed PDFs are moved here — local only, never synced to iCloud
+PDF_ARCHIVE_PATH = Path(r"C:\Users\parre\PDFArchive")
+
 # ── API ───────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
@@ -54,3 +60,7 @@ def load_prompt(name: str, **kwargs) -> str:
 
 # ── Watchdog ──────────────────────────────────────────────────────────────────
 WATCH_RECURSIVE = True
+RESCAN_INTERVAL_SECS = 60  # re-scan inbox/triggers every X seconds (iCloud doesn't fireEvents reliably)
+
+# ── Lint ──────────────────────────────────────────────────────────────────────
+LINT_REPORT_PATH = VAULT_PATH.parent / "lint_report.txt"  # written by lint.py
