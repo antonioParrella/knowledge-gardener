@@ -5,7 +5,7 @@ Full clipped content:
 
 Analyse this article thoroughly. Consider:
 - What are the core arguments and how strong is the evidence?
-- What are the key concepts that are introduced — describe them specifically, with mathematical detail where applicable
+- What are the key ideas that are introduced — describe them specifically, with mathematical detail where applicable
 - Make sure that the argument from the text can be clearly reconstructed from the summary you write, don't be afraid of being long.  
 
 Write your detailed analysis freely in markdown. Format mathematics using LaTeX with $...$ for inline and $$...$$ for display math — it will render with MathJax in Obsidian.

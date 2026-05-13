@@ -45,10 +45,16 @@ def gemini_simple(prompt: str, system: str = "") -> str:
                 )
                 return response.candidates[0].content.parts[0].text
             except Exception as e:
-                if "429" in str(e) or "quota" in str(e).lower():
-                    wait = 2 ** attempt * 5
-                    print(f"[gemini] Rate limited, waiting {wait}s...")
-                    time.sleep(wait)
+                err = str(e)
+                if "429" in err or "quota" in err.lower():
+                    if "PerDay" in err or "per_day" in err.lower():
+                        print(f"[gemini] Daily quota exhausted for {model_name}, trying next model...")
+                        break
+                    print(f"[gemini] RPM limit hit on {model_name}, waiting 60s...")
+                    time.sleep(60)
+                elif "503" in err or "UNAVAILABLE" in err:
+                    print(f"[gemini] {model_name} unavailable, waiting 60s...")
+                    time.sleep(60)
                 else:
                     print(f"[gemini] Error with {model_name}: {e}")
                     break
@@ -84,14 +90,21 @@ def gemini_tool_loop(
                         config={
                             "system_instruction": system,
                             "tools": tool_schema,
+                            "automatic_function_calling": {"disable": True},
                         }
                     )
                     break
                 except Exception as e:
-                    if "429" in str(e) or "quota" in str(e).lower():
-                        wait = 2 ** attempt * 5
-                        print(f"[gemini] Rate limited on iteration {iteration}, waiting {wait}s...")
-                        time.sleep(wait)
+                    err = str(e)
+                    if "429" in err or "quota" in err.lower():
+                        if "PerDay" in err or "per_day" in err.lower():
+                            print(f"[gemini] Daily quota exhausted for {model_name}, trying next model...")
+                            break
+                        print(f"[gemini] RPM limit hit on {model_name}, waiting 60s...")
+                        time.sleep(60)
+                    elif "503" in err or "UNAVAILABLE" in err:
+                        print(f"[gemini] {model_name} unavailable, waiting 60s...")
+                        time.sleep(60)
                     else:
                         continue
             else:

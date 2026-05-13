@@ -43,8 +43,8 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
             f"Tags: {', '.join(tags)}\n\n"
             f"Existing MOCs:\n{existing}\n\n"
             "Which MOC should this note go in?\n"
-            "Reply with ONLY the topic name — one or two words, title case.\n"
-            "Use an existing MOC name if it fits, or suggest a new short name.\n"
+            "Output ONLY the topic name — nothing else. No bullet points, no explanation, no reasoning.\n"
+            "One or two words, title case. Use an existing MOC name if it fits, or suggest a new short name.\n"
             "Examples: AI, Programming, Health, Finance, Productivity"
         ),
         system=(
@@ -52,7 +52,12 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
             "Assign notes to topic MOCs. Be consistent with existing names."
         )
     )
-    return response.strip().strip("'\".,").title()
+    topic = response.strip().strip("'\".,")
+    if len(topic) > 40 or "\n" in topic:
+        first_line = topic.splitlines()[0].strip().strip("'\".,*-# ")
+        words = first_line.split()
+        topic = " ".join(words[:3]) if words else "General"
+    return topic.title()
 
 
 def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):

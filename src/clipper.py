@@ -103,11 +103,8 @@ def process_clipped_note(path: Path):
     source_url = fm.get("source", "unknown")
     existing = _find_existing_source(source_url)
     if existing and existing != path:
-        print(f"[clip] SKIP: duplicate source URL — already in {existing.stem}")
-        fm["processed"] = True
-        fm["processed_date"] = today()
-        fm["duplicate_of"] = str(existing.relative_to(VAULT_PATH))
-        write_note(path, fm, body)
+        print(f"[clip] DELETE: duplicate source URL — already in {existing.stem}")
+        path.unlink()
         return
 
     print(f"[clip] Processing: {path.name}")
@@ -142,19 +139,19 @@ def process_clipped_note(path: Path):
 
     summary_body = f"{analysis}\n\n---\n\n## Original Content\n\n{body}"
 
-    fm["processed"] = True
-    fm["processed_date"] = today()
-    if tags:
-        fm["tags"] = tags
-
-    write_note(path, fm, summary_body)
-
     index_note(
         note_title=path.stem,
         note_path=path,
         summary=moc_summary,
         tags=tags,
     )
+
+    fm["processed"] = True
+    fm["processed_date"] = today()
+    if tags:
+        fm["tags"] = tags
+
+    write_note(path, fm, summary_body)
 
     print(f"[clip] Done: {path.stem}")
 

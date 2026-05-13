@@ -42,6 +42,9 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google.genai").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
 
 
 # ── Startup checks ────────────────────────────────────────────────────────────
@@ -75,6 +78,7 @@ def startup_checks():
                 process_clipped_note(path)
             except Exception as e:
                 log.error(f"Error processing backlog {path.name}: {e}")
+            time.sleep(3)
 
     unprocessed_pdfs = find_unprocessed_pdfs(PDF_INBOX_PATH)
     if unprocessed_pdfs:
@@ -85,6 +89,7 @@ def startup_checks():
                 process_pdf(path)
             except Exception as e:
                 log.error(f"Error processing backlog {path.name}: {e}")
+            time.sleep(3)
 
 
 # ── File event handler ────────────────────────────────────────────────────────
@@ -181,12 +186,14 @@ def main():
                         process_clipped_note(path)
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
+                    time.sleep(3)
                 for path in find_unprocessed_pdfs(PDF_INBOX_PATH):
                     try:
                         log.info(f"Processing: {path.name}")
                         process_pdf(path)
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
+                    time.sleep(3)
     except KeyboardInterrupt:
         log.info("Stopping...")
         observer.stop()
