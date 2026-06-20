@@ -46,9 +46,14 @@ def reset_clips(dry_run: bool = False) -> set[str]:
             reset_stems.add(md_file.stem)
             continue
 
+        # Reached only for clips that were processed AND have an Original Content
+        # section (guards above) — i.e. they already carry a clean, Gemini-generated
+        # title. preserve_title tells the clipper to keep this filename on re-index
+        # so existing wikilinks stay stable. New/unprocessed clips never reach here.
         fm["processed"] = False
         fm.pop("processed_date", None)
         fm.pop("tags", None)
+        fm["preserve_title"] = True
         write_note(md_file, fm, original)
         print(f"[reset] {md_file.name}")
         reset_stems.add(md_file.stem)

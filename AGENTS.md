@@ -29,7 +29,7 @@ Total cost: **$0**.
 | Component      | Choice                          | Why                                      |
 |----------------|---------------------------------|------------------------------------------|
 | Sync           | iCloud Drive                    | Native on iPhone, works on Surface       |
-| AI             | Gemini 2.5 Flash (free tier)    | 1,500 req/day, strong tool calling       |
+| AI             | Gemini Flash (free tier)        | `gemini-3-flash-preview` + lite fallback |
 | Trigger        | Python watchdog on Surface      | Monitors vault for new notes             |
 | Web search     | DuckDuckGo (no key needed)      | Free, no signup                          |
 | Index          | Markdown MOCs in vault          | Obsidian-native, no extra tools          |
@@ -42,7 +42,7 @@ Total cost: **$0**.
 ```
 MyVault/
 │
-├── Inbox/                          ← Web Clipper saves here
+├── Clippings/                      ← Web Clipper saves here
 │   ├── Clipped - Article Title.md  ← Before processing
 │   └── Clean Article Title.md      ← After (renamed by agent)
 │
@@ -54,9 +54,9 @@ MyVault/
 │
 ├── Index/                          ← Agent-maintained knowledge base
 │   ├── _index.md                   ← Master list of all MOCs
-│   ├── MOC - AI.md
-│   ├── MOC - Programming.md
-│   └── MOC - Health.md
+│   ├── MOC - LLM Training.md       ← specific sub-fields, not broad domains
+│   ├── MOC - Generative Models.md
+│   └── MOC - Sports Nutrition.md
 │
 └── _triggers/                      ← Research trigger notes (from iPhone)
     └── research - quantum computing.md
@@ -85,24 +85,6 @@ obsidian_system/
     ├── reset_clips.py       ← Standalone script to revert clips to original
     └── lint.py              ← Vault health checker (run periodically)
 ```
-obsidian_system/
-├── prompts/
-│   ├── clip_system.md      ← System prompt for clip processing
-│   ├── clip_analysis.md    ← User prompt template for clip analysis
-│   └── research_system.md  ← System prompt for agentic research
-└── src/
-    ├── config.py            ← All settings (edit VAULT_PATH here)
-    ├── notes.py             ← Read/write markdown note helpers
-    ├── gemini_client.py     ← Gemini API wrapper with fallback + retry
-    ├── indexer.py           ← MOC creation and maintenance
-    ├── web_tools.py         ← search_web, fetch_url, save_source tools
-    ├── clipper.py           ← Web Clipper note processing pipeline
-    ├── researcher.py        ← Agentic research pipeline
-    ├── pdf_processor.py     ← PDF text extraction + summarisation
-    ├── obsidian_watchdog.py ← Main entry point, file system monitor
-    ├── reset_clips.py       ← Standalone script to revert clips to original
-    └── lint.py              ← Vault health checker (run periodically)
-```
 
 ---
 
@@ -112,12 +94,12 @@ obsidian_system/
 
 ```
 1. You clip a page in your browser (Chrome/Firefox/Safari)
-2. Web Clipper saves it to Inbox/ with:
+2. Web Clipper saves it to Clippings/ with:
       clipped: true
       processed: false
       source: "https://..."
 3. iCloud syncs to Surface
-4. watchdog.py detects new file in Inbox/
+4. obsidian_watchdog.py detects new file in Clippings/
 5. clipper.py checks for duplicate source URLs (skips if already in vault)
 6. clipper.py reads the content
 7. Gemini returns: title, summary, takeaways, tags (as JSON)
@@ -138,7 +120,7 @@ obsidian_system/
       urls:             # optional seed URLs
         - https://...
 2. iCloud syncs to Surface
-3. watchdog.py detects new file in _triggers/
+3. obsidian_watchdog.py detects new file in _triggers/
 4. researcher.py checks existing MOCs for prior context on this topic
 5. Gemini enters agentic tool loop:
       → calls search_web("quantum computing 2025")
@@ -162,12 +144,22 @@ python src/reset_clips.py --dry-run        # preview without changes
 Reverses the clip pipeline for all processed clips in Clippings/:
 1. Finds notes with `processed: true`
 2. Extracts original content from after the `## Original Content` header
-3. Resets frontmatter: `processed: false`, removes `tags` and `processed_date`
+3. Resets frontmatter: `processed: false`, removes `tags` and `processed_date`, sets `preserve_title: true`
 4. Surgically removes clip entries from MOCs, decrementing `note_count`
 5. Deletes MOCs that drop to 0 entries and cleans up `_index.md`
 
 Skipped clips (no `## Original Content` header) and non-clip entries in MOCs
 (research notes, sources) are left untouched.
+
+**Re-indexing into new MOCs.** After changing the MOC-assignment prompt in
+`indexer.py`, run `reset_clips.py` then re-run the pipeline (`python
+src/obsidian_watchdog.py` drains the unprocessed backlog on startup). Every clip
+is re-summarised and re-assigned to a MOC under the new rules. The one-shot
+`preserve_title` flag set during reset tells `clipper.py` to keep each clip's
+existing filename on reprocess, so wikilinks never break — only the analysis,
+one-line summary, and MOC assignment are regenerated. The flag is consumed
+(popped) on the first reprocess and never persists. Brand-new clips (no flag)
+are renamed to their clean Gemini title as usual.
 
 ### save_source (new in v3)
 
@@ -211,60 +203,38 @@ Scans the vault for common issues without using the Gemini API. Detects:
 
 ### Inline Duplicate Prevention
 
-`clipper.py` now checks for existing notes with the same `source` URL before processing a new clip. If found, the duplicate is marked `processed: true` with a `duplicate_of` field, and no Gemini call is wasted.
-
-### Vault Linting
-
-```
-python src/lint.py           # full report to console
-python src/lint.py --quiet   # only print if issues found (for scheduled runs)
-python src/lint.py --fix     # auto-fix what can be fixed
-```
-
-Scans the vault for common issues without using the Gemini API. Detects:
-1. **Duplicate source URLs** — Multiple notes in Clippings/ or Sources/ with the same `source`
-2. **Broken YAML frontmatter** — Notes with malformed or unparseable frontmatter
-3. **MOC note_count mismatch** — Frontmatter count doesn't match actual `[[links]]`
-4. **Orphan wikilinks** — `[[Some Note]]` in a MOC with no matching .md file anywhere
-5. **Duplicate MOC entries** — Same `[[link]]` listed twice in one MOC
-8. **Empty body notes** — Notes with no content after frontmatter
-9. **Stale _index.md references** — Index points to MOCs that don't exist
-
-`--fix` automatically resolves checks 1, 3, 4, 5, and 9:
-| Check | Fix action |
-|-------|-----------|
-| Duplicate sources | Deletes the lesser copy (iCloud ghost > "Copy" > unprocessed > newest) |
-| Orphan wikilinks | Removes dead `[[link]]` from MOC, decrements `note_count` |
-| MOC note_count | Updates frontmatter to match actual count |
-| Stale _index.md | Removes dead MOC references |
-| Duplicate MOC entries | Deduplicates, updates `note_count` |
-
-### Inline Duplicate Prevention
-
-`clipper.py` now checks for existing notes with the same `source` URL before processing a new clip. If found, the duplicate is marked `processed: true` with a `duplicate_of` field, and no Gemini call is wasted.
+`clipper.py` checks for existing notes with the same `source` URL before processing a new clip. If found, the duplicate is deleted and no Gemini call is wasted.
 
 ---
 
-## MOC Format
+## MOC Format & Granularity
 
-MOCs are created and maintained entirely by the agent. Example:
+MOCs are created and named entirely by the agent (`assign_to_moc()` in
+`indexer.py`). Each MOC should be a **specific sub-field, not a broad domain** —
+`MOC - Generative Models`, not `MOC - AI`; `MOC - Sports Nutrition`, not
+`MOC - Health`. The assignment prompt gives Gemini sub-field examples and
+explicitly calls out broad labels as too coarse. Critically, it does **not**
+tell Gemini to "be consistent with existing names" — that instruction used to
+create a feedback loop where every new note piled into whichever big MOC already
+existed (e.g. a single 40-note `MOC - AI`). Acronyms (AI, LLM, ML, RL…) are kept
+uppercase by `_titlecase_topic()`.
+
+Example:
 
 ```markdown
 ---
 moc: true
-topic: AI
-note_count: 8
-updated: '2025-04-15'
+topic: Generative Models
+note_count: 5
+updated: '2026-06-20'
 ---
 
-# AI — Knowledge Index
+# Generative Models — Knowledge Index
 
 ## Notes
-- [[Research - Gemini API Overview]] — Free tier limits, function calling, grounding options
-- [[Attention Is All You Need]] — Original transformer paper, key architectural insights
-- [[GPT-4 Technical Report]] — Benchmarks, safety approach, multimodal capability
-- [[Source - Andrej Karpathy LLM Intro]] — Accessible explanation of how LLMs work
-- [[Research - Agentic Coding Tools]] — Comparison of Claude Code, Cursor, OpenCode
+- [[An Introduction to Flow Matching and Diffusion Models]] — Noise→data via learned neural vector fields simulating ODE/SDE trajectories
+- [[Geometric Stability Analysis of Autonomous Generative Models]] — Riemannian gradient flow on marginal energy with implicit metrics for stability
+- [[Metropolis-Adjusted Diffusion Models]] — Replaces biased ULA correctors with Metropolis-adjusted, score-based steps
 ```
 
 ---
@@ -293,7 +263,7 @@ output: "Research - Quantum Computing.md"
 ## Web Clipper Setup
 
 1. Install **Obsidian Web Clipper** from the Chrome or Firefox extension store
-2. In extension settings → set save folder to `Inbox/`
+2. In extension settings → set save folder to `Clippings/`
 3. Set the note template:
 
 ```
@@ -336,7 +306,7 @@ after the agent has processed the note so it never gets processed twice.
 
 ### 3. Python Dependencies
 ```bash
-pip install google-generativeai watchdog PyYAML requests
+pip install google-genai watchdog PyYAML requests python-dotenv pymupdf
 ```
 
 ### 4. Configure the Script
@@ -344,8 +314,7 @@ Edit `src/config.py` — update `VAULT_PATH` to match your actual vault location
 
 ### 5. Run
 ```bash
-cd obsidian_system/src
-python watchdog.py
+python src/obsidian_watchdog.py
 ```
 
 You should see:
@@ -353,7 +322,7 @@ You should see:
 Obsidian Auto-Research System
 Vault: C:\Users\You\iCloud Drive\Obsidian\MyVault
 Watching for:
-  Clips    → Inbox/
+  Clips    → Clippings/
   Research → _triggers/
 Press Ctrl+C to stop.
 ```
@@ -362,8 +331,8 @@ Press Ctrl+C to stop.
 Create a `.bat` file:
 ```bat
 @echo off
-cd C:\path\to\obsidian_system\src
-python watchdog.py
+cd C:\path\to\knowledge-gardener
+python src\obsidian_watchdog.py
 ```
 Press `Win+R` → type `shell:startup` → copy the `.bat` file there.
 
@@ -373,23 +342,23 @@ Press `Win+R` → type `shell:startup` → copy the `.bat` file there.
 
 ```
 Week 1
-  Clip 5 AI articles → MOC - AI.md created (5 entries)
+  Clip 5 diffusion-model papers → MOC - Generative Models.md created (5 entries)
 
 Week 2
   Research "LLM fine-tuning"
-    → agent finds MOC - AI.md, uses it as prior context
+    → agent finds MOC - LLM Training.md, uses it as prior context
     → saves 2 high-quality sources → Sources/
-    → those sources also added to MOC - AI.md
-    → research note added → MOC - AI.md now has 8 entries
+    → those sources also added to MOC - LLM Training.md
+    → research note added → MOC - LLM Training.md grows
 
 Week 3
-  Clip Python tutorial → MOC - Programming.md created
+  Clip a mechanistic-interpretability paper → MOC - Mechanistic Interpretability.md created
   Research "agentic coding tools"
-    → agent pulls from MOC - AI.md AND MOC - Programming.md
+    → agent pulls from MOC - LLM Training.md AND MOC - Agentic Systems.md
     → builds on both, doesn't repeat what's already known
 
 Month 2
-  30+ notes across 5-6 MOCs
+  30+ notes across many specific MOCs (not one giant catch-all)
   Research notes reference prior research
   Agent produces progressively more specific, personalised summaries
 ```
@@ -405,8 +374,9 @@ Month 2
 | iCloud sync          | 5 GB free      | Well within limits |
 | Web Clipper          | Free           | Free               |
 
-The script automatically falls back through `gemini-2.5-flash` →
-`gemini-2.0-flash` → `gemini-2.5-flash-lite` if rate limits are hit.
+The script automatically falls back from `gemini-3-flash-preview` →
+`gemini-3.1-flash-lite-preview` if a model's daily quota is hit (see
+`GEMINI_MODELS` in `config.py`).
 
 ---
 

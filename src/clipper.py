@@ -131,7 +131,12 @@ def process_clipped_note(path: Path):
     analysis = data.get("content") or data.get("summary") or ""
     moc_summary = data.get("moc_summary") or ""
 
-    if clean_title != path.stem:
+    # On re-index (clip was reset with preserve_title), keep the existing filename
+    # so wikilinks stay stable. Absent on new clips => False, so they rename normally.
+    # Popped so the flag is consumed and never persists past one reprocess.
+    preserve_title = fm.pop("preserve_title", False)
+
+    if clean_title != path.stem and not preserve_title:
         new_path = path.parent / f"{clean_title}.md"
         if not new_path.exists():
             path.rename(new_path)

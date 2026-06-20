@@ -15,6 +15,21 @@ from gemini_client import gemini_simple
 from config import INDEX_PATH
 
 
+# Acronyms that should stay uppercase in MOC names (title() would lowercase them).
+_ACRONYMS = {"AI", "ML", "LLM", "RL", "NLP", "RAG", "GPU", "IIT", "TDA", "MOC", "CV", "RNN", "CNN"}
+
+
+def _titlecase_topic(topic: str) -> str:
+    """Title-case a topic name while preserving known acronyms (AI, LLM, ML...)."""
+    words = []
+    for word in topic.split():
+        if word.upper() in _ACRONYMS:
+            words.append(word.upper())
+        else:
+            words.append(word.title())
+    return " ".join(words)
+
+
 def get_existing_mocs() -> str:
     """Return a plain-text summary of all existing MOCs for the agent."""
     mocs = list(INDEX_PATH.glob("MOC - *.md"))
@@ -45,11 +60,16 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
             "Which MOC should this note go in?\n"
             "Output ONLY the topic name — nothing else. No bullet points, no explanation, no reasoning.\n"
             "One or two words, title case. Use an existing MOC name if it fits, or suggest a new short name.\n"
-            "Examples: AI, Programming, Health, Finance, Productivity"
+            "Each MOC represents a sub-field, not a broad domain. "
+            "For example, 'Health' is too broad — use things like 'Resistance Training', 'Addiction', or 'Vaccines' instead. "
+            "'AI' is too broad — use things like 'LLM Training', 'Diffusion Models', 'World Models', or 'Mechanistic Interpretability' instead. "
+            "Examples of good MOC names: LLM Training, Generative Models, Mechanistic Interpretability, ML Theory, "
+            "AI Consciousness, Representation Learning, Resistance Training, Addiction, Vaccines, "
+            "Options Pricing, Equity Valuation, Neuroscience, Habit Formation"
         ),
         system=(
             "You manage a personal knowledge base. "
-            "Assign notes to topic MOCs. Be consistent with existing names."
+            "Assign notes to topic MOCs."
         )
     )
     topic = response.strip().strip("'\".,")
@@ -57,7 +77,7 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
         first_line = topic.splitlines()[0].strip().strip("'\".,*-# ")
         words = first_line.split()
         topic = " ".join(words[:3]) if words else "General"
-    return topic.title()
+    return _titlecase_topic(topic)
 
 
 def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):
