@@ -12,7 +12,7 @@ import json
 import re
 import time
 from google.genai import Client
-from config import GEMINI_API_KEY, GEMINI_MODELS, MAX_SEARCH_ITERATIONS
+from config import GEMINI_API_KEY, GEMINI_MODELS, MAX_SEARCH_ITERATIONS, GEMINI_THINKING_LEVEL
 
 client = Client(api_key=GEMINI_API_KEY)
 
@@ -38,10 +38,13 @@ def gemini_simple(prompt: str, system: str = "") -> str:
     for model_name in GEMINI_MODELS:
         for attempt in range(3):
             try:
+                cfg = {"thinking_config": {"thinking_level": GEMINI_THINKING_LEVEL}}
+                if system:
+                    cfg["system_instruction"] = system
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt,
-                    config={"system_instruction": system} if system else {}
+                    config=cfg,
                 )
                 return response.candidates[0].content.parts[0].text
             except Exception as e:
@@ -91,6 +94,7 @@ def gemini_tool_loop(
                             "system_instruction": system,
                             "tools": tool_schema,
                             "automatic_function_calling": {"disable": True},
+                            "thinking_config": {"thinking_level": GEMINI_THINKING_LEVEL},
                         }
                     )
                     break

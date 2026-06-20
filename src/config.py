@@ -33,9 +33,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Models to try in order if rate limits are hit
 GEMINI_MODELS = [
     "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemma-4-31b-it",
+    "gemini-3.1-flash-lite-preview"
 ]
+
+GEMINI_THINKING_LEVEL = "high"  # "minimal" | "low" | "medium" | "high"
 
 # ── Research settings ─────────────────────────────────────────────────────────
 MAX_SEARCH_ITERATIONS  = 15    # max tool call loops per research run
