@@ -18,7 +18,7 @@ from gemini_client import gemini_simple, parse_json_response
 from indexer import index_note
 
 
-def _find_existing_source(source_url: str) -> Path | None:
+def find_existing_source(source_url: str) -> Path | None:
     """
     Check if any existing note in Clippings/ or Sources/ already has this source URL.
     Returns the existing note's path if found, None otherwise.
@@ -86,30 +86,36 @@ def reset_clips(inbox_path: Path, dry_run: bool = False):
     return count
 
 
-def process_clipped_note(path: Path):
+def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     """
     Full processing pipeline for a Web Clipper note.
     Skips silently if not a valid unprocessed clip.
+
+    content_limit caps how much of the body is sent to the analysis model;
+    full-text papers pass a higher limit so the analysis sees more than the
+    first couple of pages. The full body is always preserved as Original Content.
+
+    Returns the final note path (which may have been renamed) on success, else None.
     """
     try:
         fm, body = read_note(path)
     except Exception as e:
         print(f"[clip] Could not read {path.name}: {e}")
-        return
+        return None
 
     if fm.get("processed") is True:
-        return
+        return path
 
     source_url = fm.get("source", "unknown")
-    existing = _find_existing_source(source_url)
+    existing = find_existing_source(source_url)
     if existing and existing != path:
         print(f"[clip] DELETE: duplicate source URL — already in {existing.stem}")
         path.unlink()
-        return
+        return None
 
     print(f"[clip] Processing: {path.name}")
 
-    content = body[:CLIP_CONTENT_LIMIT]
+    content = body[:content_limit]
 
     system_prompt = load_prompt("clip_system")
     user_prompt = load_prompt("clip_analysis", source_url=source_url, content=content)
@@ -122,7 +128,7 @@ def process_clipped_note(path: Path):
     data = parse_json_response(result_text)
     if not data:
         print(f"[clip] JSON parse failed for {path.name}, leaving original untouched.")
-        return
+        return None
 
     summary_title = data.get("title", path.stem)
     clean_title = safe_filename(summary_title)
@@ -159,6 +165,7 @@ def process_clipped_note(path: Path):
     write_note(path, fm, summary_body)
 
     print(f"[clip] Done: {path.stem}")
+    return path
 
 
 if __name__ == "__main__":

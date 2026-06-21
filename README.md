@@ -4,7 +4,7 @@ Personal knowledge management system that runs automatically on your Surface, tr
 
 **Clip mode** — Save any web page with the Obsidian Web Clipper extension. The agent automatically summarises it, extracts key takeaways and tags, and indexes it into your vault.
 
-**Research mode** — Create a trigger note on your iPhone. The agent searches the web, reads full articles, saves high-quality sources it finds, and writes a comprehensive summary back to your vault.
+**Research mode** — Create a trigger note on your iPhone (or add a `> [!research]` callout to any note). The agent discovers academic papers (arXiv + OpenAlex) and authoritative web sources, retrieves their **full text**, runs each one through the clip pipeline so it becomes an indexed clipping, then synthesises a long, detailed report that cites every source with `[[wikilinks]]`.
 
 Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the agent builds and updates automatically. Over time the agent builds on prior knowledge rather than starting from scratch each time.
 
@@ -13,24 +13,26 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 - **Sync**: iCloud Drive (native on iPhone, works on Surface)
 - **AI**: Gemini Flash (`gemini-3-flash-preview` → `gemini-3.1-flash-lite-preview` fallback)
 - **Trigger**: Python watchdog on Surface
-- **Web search**: DuckDuckGo
+- **Academic search**: arXiv + OpenAlex (no key needed); full-text PDFs via PyMuPDF
+- **Web search**: Tavily (free API key)
 - **Index**: Markdown MOCs in vault
 
 ## Setup
 
 1. Install iCloud for Windows and move your Obsidian vault to iCloud Drive
 2. Get a Gemini API key from https://aistudio.google.com and set `GEMINI_API_KEY`
-3. Install dependencies: `pip install google-genai watchdog PyYAML requests python-dotenv pymupdf`
-4. Configure `src/config.py` with your vault path
-5. Run: `python src/obsidian_watchdog.py`
+3. Get a free Tavily key from https://tavily.com and set `TAVILY_API_KEY` (optional — without it, research uses the academic sources only)
+4. Install dependencies: `pip install -r requirements.txt`
+5. Configure `src/config.py` with your vault path
+6. Run: `python src/obsidian_watchdog.py`
 
 ## Vault Structure
 
 ```
 MyVault/
-├── Clippings/      ← Web Clipper saves here
-├── Research/       ← Agent-generated research notes
-├── Sources/        ← Sources saved during research
+├── Clippings/      ← Web Clipper saves here; research-found sources land here too
+├── Research/       ← Agent-generated research reports
+├── Sources/        ← Legacy agent-saved sources (still read for context/dedup)
 ├── Index/          ← Agent-maintained knowledge base (MOCs + _index.md)
 └── _triggers/      ← Research trigger notes
 ```
@@ -38,7 +40,33 @@ MyVault/
 ## How It Works
 
 - **Clip pipeline**: Clip a page → agent summarises → indexes into MOC
-- **Research pipeline**: Create trigger note → agent researches → writes summary → indexes into MOC
+- **Research pipeline** (4 phases): ① select relevant existing clippings (Gemini-judged over the MOC catalog) → ② discovery loop searches arXiv/OpenAlex/web and queues sources → ③ each queued source's full text is fetched, analysed, and saved as an indexed clipping → ④ synthesis writes a long report citing every source with `[[wikilinks]]`. Paywalled papers fall back to an abstract-only clipping (`full_text: false`) rather than being dropped.
+
+### Research triggers
+
+Create a note in `_triggers/`:
+
+```yaml
+---
+research: true
+topic: "diffusion models for protein design"
+depth: comprehensive   # standard | deep | comprehensive
+urls:                  # optional seed URLs
+  - https://...
+---
+```
+
+`depth` controls how thorough discovery is. For `comprehensive`, synthesis runs a draft → critique → revise pass for extra depth. The agent queues as many or as few sources as the topic needs — there is no cap.
+
+### Inline research callouts
+
+Add a callout anywhere in an existing note and save:
+
+```markdown
+> [!research] How does X compare to Y?
+```
+
+On the next scan the agent researches it and replaces the callout in place with a `> [!done]` marker followed by the findings — no separate note needed.
 
 ## MOCs: Specific Sub-Fields, Not Broad Domains
 

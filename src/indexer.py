@@ -8,11 +8,15 @@ Responsible for:
   - Maintaining the master _index.md
 """
 
+import re
 import time
 from pathlib import Path
 from notes import read_note, write_note, today
-from gemini_client import gemini_simple
-from config import INDEX_PATH
+from gemini_client import gemini_simple, parse_json_response
+from config import INDEX_PATH, INBOX_PATH, SOURCES_PATH
+
+# Matches a MOC note entry: "- [[Title]] — summary" (em-dash or hyphen separator).
+_MOC_ENTRY_RE = re.compile(r"-\s*\[\[([^\]|#]+)\]\]\s*(?:[—-]\s*(.*))?$")
 
 
 # Acronyms that should stay uppercase in MOC names (title() would lowercase them).
@@ -171,3 +175,83 @@ def get_prior_context(topic: str) -> str:
         return ""
 
     return "## Relevant content from your knowledge base:\n\n" + "\n\n".join(matches[:3])
+
+
+def _read_moc_catalog() -> list[tuple[str, str]]:
+    """
+    Read every MOC and return the full (title, summary) catalog of indexed notes.
+    The MOCs already hold a one-line summary per note, so this is cheap.
+    """
+    catalog: list[tuple[str, str]] = []
+    seen = set()
+    for moc in INDEX_PATH.glob("MOC - *.md"):
+        try:
+            _, body = read_note(moc)
+        except Exception:
+            continue
+        for line in body.splitlines():
+            m = _MOC_ENTRY_RE.match(line.strip())
+            if not m:
+                continue
+            title = m.group(1).strip()
+            summary = (m.group(2) or "").strip()
+            if title and title not in seen:
+                seen.add(title)
+                catalog.append((title, summary))
+    return catalog
+
+
+def _locate_note(title: str) -> Path | None:
+    """Find the note file for a given title in Clippings/ or Sources/."""
+    for folder in (INBOX_PATH, SOURCES_PATH):
+        candidate = folder / f"{title}.md"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def find_relevant_clippings(topic: str) -> list[dict]:
+    """
+    Ask Gemini which existing notes are relevant to a research topic, using the
+    MOC catalog (title + one-line summary) as the candidate list — no keyword
+    prefilter. Returns [{title, analysis}] with the full analysis loaded for each
+    selected note (the body before the "## Original Content" section).
+    """
+    catalog = _read_moc_catalog()
+    if not catalog:
+        return []
+
+    catalog_text = "\n".join(f"- {title} — {summary}" for title, summary in catalog)
+    response = gemini_simple(
+        prompt=(
+            f"Research topic: {topic}\n\n"
+            f"Existing notes in the knowledge base:\n{catalog_text}\n\n"
+            "Return a JSON array of the EXACT note titles that are genuinely relevant "
+            "to researching this topic. Use the titles verbatim. Include only real "
+            "matches — return [] if none are relevant. No prose, JSON array only."
+        ),
+        system=(
+            "You select relevant prior notes from a personal knowledge base. "
+            "Be precise: only include notes that materially relate to the topic."
+        ),
+    )
+
+    titles = parse_json_response(response)
+    if not isinstance(titles, list):
+        return []
+
+    valid = {t for t, _ in catalog}
+    results = []
+    for title in titles:
+        if not isinstance(title, str) or title not in valid:
+            continue
+        note_path = _locate_note(title)
+        if not note_path:
+            continue
+        try:
+            _, body = read_note(note_path)
+        except Exception:
+            continue
+        analysis = body.split("## Original Content")[0].strip()
+        results.append({"title": title, "analysis": analysis})
+    return results

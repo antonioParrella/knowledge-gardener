@@ -12,6 +12,7 @@ import json
 import re
 import time
 from google.genai import Client
+from google.genai import types
 from config import GEMINI_API_KEY, GEMINI_MODELS, MAX_SEARCH_ITERATIONS, GEMINI_THINKING_LEVEL
 
 client = Client(api_key=GEMINI_API_KEY)
@@ -82,9 +83,10 @@ def gemini_tool_loop(
     Returns the final text response.
     """
     for model_name in GEMINI_MODELS:
-        messages = [{"role": "user", "parts": [{"text": prompt}]}]
+        messages = [types.Content(role="user", parts=[types.Part(text=prompt)])]
 
         for iteration in range(max_iterations):
+            response = None
             for attempt in range(3):
                 try:
                     response = client.models.generate_content(
@@ -92,7 +94,7 @@ def gemini_tool_loop(
                         contents=messages,
                         config={
                             "system_instruction": system,
-                            "tools": tool_schema,
+                            "tools": [{"function_declarations": tool_schema}],
                             "automatic_function_calling": {"disable": True},
                             "thinking_config": {"thinking_level": GEMINI_THINKING_LEVEL},
                         }
@@ -103,6 +105,7 @@ def gemini_tool_loop(
                     if "429" in err or "quota" in err.lower():
                         if "PerDay" in err or "per_day" in err.lower():
                             print(f"[gemini] Daily quota exhausted for {model_name}, trying next model...")
+                            fatal = True
                             break
                         print(f"[gemini] RPM limit hit on {model_name}, waiting 60s...")
                         time.sleep(60)
@@ -110,29 +113,39 @@ def gemini_tool_loop(
                         print(f"[gemini] {model_name} unavailable, waiting 60s...")
                         time.sleep(60)
                     else:
-                        continue
-            else:
-                return "Research interrupted due to repeated rate limiting."
+                        # Surface unexpected errors and move to the next model.
+                        print(f"[gemini] Tool-loop error on {model_name}: {e}")
+                        break
+
+            if response is None:
+                # All attempts failed (rate-limited out or fatal) — try the next model.
+                break
 
             candidate = response.candidates[0]
-            parts = candidate.content.parts
+            parts = candidate.content.parts or []
 
-            tool_calls = [p.function_call for p in parts if hasattr(p, "function_call") and p.function_call.name]
+            tool_calls = [
+                p.function_call for p in parts
+                if getattr(p, "function_call", None) and p.function_call.name
+            ]
 
             if not tool_calls:
-                text_parts = [p.text for p in parts if hasattr(p, "text")]
+                text_parts = [p.text for p in parts if getattr(p, "text", None)]
                 return "\n".join(text_parts).strip()
 
-            messages.append({"role": "model", "parts": [p for p in parts if hasattr(p, "function_call")]})
-            tool_results = []
+            # Append the model's turn (with its function-call parts) to history,
+            # then reply with a function_response part for each call.
+            messages.append(candidate.content)
+            response_parts = []
             for fc in tool_calls:
                 print(f"[gemini] Tool call: {fc.name}({dict(fc.args)})")
                 result = tool_executor(fc.name, dict(fc.args))
-                tool_results.append({
-                    "role": "tool",
-                    "parts": [{"text": result}],
-                })
-            messages.append({"role": "user", "parts": tool_results})
+                response_parts.append(
+                    types.Part.from_function_response(
+                        name=fc.name, response={"result": result}
+                    )
+                )
+            messages.append(types.Content(role="user", parts=response_parts))
 
         return "Research timed out after maximum iterations."
 

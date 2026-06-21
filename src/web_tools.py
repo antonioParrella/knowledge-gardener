@@ -1,71 +1,132 @@
 """
-web_tools.py — Web search and fetch tools used by the research agent.
+web_tools.py — Search, fetch, and source-queueing tools for the research agent.
 
-Three tools available to the Gemini agent:
-  search_web   — DuckDuckGo search, returns top results
-  fetch_url    — Fetches and cleans a URL's text content
-  save_source  — Agent calls this when it judges a source worth keeping;
-                 saves it to Sources/ and indexes it like a clipped note
+Tools available to the Gemini agent:
+  search_arxiv / search_openalex — academic paper search
+  search_web                     — Tavily general web search
+  fetch_url                      — fetch and clean a web page's text
+  queue_source                   — mark a source for full processing into the vault
 """
 
 import re
-import json
-import time
 import requests
-from pathlib import Path
 
-from config import FETCH_CONTENT_LIMIT, SOURCES_PATH, MAX_SOURCES_PER_RUN
-from notes import write_note, safe_filename, today, read_note
-from gemini_client import gemini_simple, parse_json_response
-from indexer import index_note
-
-
-# Track how many sources have been saved in the current research run
-_sources_saved_this_run = 0
+from config import (
+    FETCH_CONTENT_LIMIT,
+    TAVILY_API_KEY, TAVILY_API_URL,
+)
+from academic import search_arxiv, search_openalex
 
 
-def reset_source_counter():
+# ── Source queue ────────────────────────────────────────────────────────────────
+# The discovery agent calls queue_source to mark sources worth processing; the
+# research pipeline then fetches + analyses each one. Tracked per run.
+_queued_sources: list[dict] = []
+
+
+def reset_queue():
     """Call this at the start of each research run."""
-    global _sources_saved_this_run
-    _sources_saved_this_run = 0
+    global _queued_sources
+    _queued_sources = []
+
+
+# Backwards-compatible alias (older callers used this name).
+reset_source_counter = reset_queue
+
+
+def get_queue() -> list[dict]:
+    """Return the sources queued during the current run."""
+    return list(_queued_sources)
+
+
+def queue_source(url: str, title: str, kind: str, reason: str, abstract: str = "") -> str:
+    """
+    Agent calls this to mark a source for full processing into the knowledge base.
+    kind is "pdf" (academic paper) or "web" (general web page).
+    abstract is the source's abstract/snippet — kept as a fallback so the source
+    survives as an abstract-only clipping if its full text can't be retrieved.
+    Deduplicated against the existing vault and the current queue; no count limit.
+    """
+    from clipper import find_existing_source  # lazy: clipper imports web tools indirectly
+
+    existing = find_existing_source(url)
+    if existing:
+        return f"Already in vault as '{existing.stem}' — no need to queue."
+
+    if any(s["url"] == url for s in _queued_sources):
+        return f"Already queued: {title}"
+
+    _queued_sources.append({
+        "url": url, "title": title, "kind": kind, "reason": reason,
+        "abstract": abstract,
+    })
+    return f"Queued '{title}' ({kind}) for processing."
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 def search_web(query: str) -> str:
     """
-    Search DuckDuckGo Instant Answer API.
-    Returns top results as plain text.
+    Search the web via the Tavily API. Returns ranked results with snippets.
+    Falls back to a clear message if no API key is configured.
     """
-    try:
-        resp = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
-            timeout=10,
+    if not TAVILY_API_KEY:
+        return (
+            "Web search is not configured (no TAVILY_API_KEY). "
+            "Use search_arxiv and search_openalex for academic sources instead."
         )
+    try:
+        resp = requests.post(
+            TAVILY_API_URL,
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "advanced",
+                "max_results": 6,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
         data = resp.json()
-        results = []
-
-        # Abstract (top result)
-        if data.get("Abstract"):
-            results.append(f"**{data['Heading']}**: {data['Abstract']}\n{data.get('AbstractURL', '')}")
-
-        # Related topics
-        for r in data.get("RelatedTopics", [])[:6]:
-            if isinstance(r, dict) and "Text" in r:
-                results.append(f"- {r['Text']}\n  {r.get('FirstURL', '')}")
-
-        if results:
-            return "\n\n".join(results)
-
-        # Fallback: try web results field
-        for r in data.get("Results", [])[:5]:
-            results.append(f"- {r.get('Text', '')}\n  {r.get('FirstURL', '')}")
-
-        return "\n".join(results) if results else f"No results found for: {query}"
-
     except Exception as e:
-        return f"Search failed: {e}"
+        return f"Web search failed: {e}"
+
+    results = []
+    if data.get("answer"):
+        results.append(f"Summary: {data['answer']}")
+    for r in data.get("results", []):
+        snippet = (r.get("content", "") or "")[:400]
+        results.append(f"- {r.get('title', '')}\n  {r.get('url', '')}\n  {snippet}")
+
+    return "\n\n".join(results) if results else f"No results found for: {query}"
+
+
+def _format_academic_results(results: list[dict]) -> str:
+    """Render academic search results for the agent."""
+    if results and "error" in results[0]:
+        return results[0]["error"]
+    if not results:
+        return "No results found."
+    lines = []
+    for r in results:
+        authors = ", ".join(r.get("authors", [])[:4])
+        pdf = r.get("pdf_url") or "(no open PDF)"
+        lines.append(
+            f"- **{r.get('title', '')}** ({r.get('source', '')})\n"
+            f"  Authors: {authors}\n"
+            f"  Landing: {r.get('landing_url', '')}\n"
+            f"  PDF: {pdf}\n"
+            f"  Abstract: {(r.get('abstract', '') or '')[:500]}"
+        )
+    return "\n\n".join(lines)
+
+
+def search_arxiv_tool(query: str) -> str:
+    return _format_academic_results(search_arxiv(query))
+
+
+def search_openalex_tool(query: str) -> str:
+    return _format_academic_results(search_openalex(query))
 
 
 def fetch_url(url: str) -> str:
@@ -93,115 +154,49 @@ def fetch_url(url: str) -> str:
         return f"Failed to fetch {url}: {e}"
 
 
-def save_source(url: str, reason: str) -> str:
-    """
-    Agent calls this when it judges a source worth keeping permanently.
-
-    Fetches the full page, summarises it with Gemini, saves it to Sources/,
-    and indexes it in the knowledge base MOCs — exactly like a clipped note.
-
-    Capped at MAX_SOURCES_PER_RUN per research session to prevent over-saving.
-    """
-    global _sources_saved_this_run
-
-    if _sources_saved_this_run >= MAX_SOURCES_PER_RUN:
-        return (
-            f"Source save limit ({MAX_SOURCES_PER_RUN}) reached for this run. "
-            f"Skipping: {url}"
-        )
-
-    print(f"[source] Agent saving source: {url}")
-    print(f"[source] Reason: {reason}")
-
-    # Fetch the page content
-    content = fetch_url(url)
-    if content.startswith("Failed to fetch"):
-        return f"Could not save source — fetch failed: {content}"
-
-    # Summarise with Gemini
-    result_text = gemini_simple(
-        prompt=(
-            f"Source URL: {url}\n"
-            f"Agent's reason for saving: {reason}\n\n"
-            f"Page content:\n{content[:8000]}\n\n"
-            "Return a JSON object with:\n"
-            "- title: clean descriptive title for this source\n"
-            "- summary: 2-3 sentence summary of the key content\n"
-            "- takeaways: list of 3-5 key points\n"
-            "- tags: list of 3-6 single-word tags (lowercase, no spaces)\n"
-            "Return only valid JSON, no markdown fences."
-        ),
-        system="You are summarising a web source for a personal research knowledge base.",
-    )
-
-    data = parse_json_response(result_text)
-    if not data:
-        # Fallback if JSON parse fails
-        data = {
-            "title": f"Source - {url[:60]}",
-            "summary": reason,
-            "takeaways": [],
-            "tags": [],
-        }
-
-    # Build the note
-    title = safe_filename(data.get("title", f"Source {today()}"))
-    note_path = SOURCES_PATH / f"{title}.md"
-
-    # Avoid duplicate saves
-    if note_path.exists():
-        return f"Source already saved: {title}"
-
-    takeaways_md = "\n".join(f"- {t}" for t in data.get("takeaways", []))
-    body = (
-        f"## Why This Was Saved\n{reason}\n\n"
-        f"## Summary\n{data.get('summary', '')}\n\n"
-        f"## Key Takeaways\n{takeaways_md}\n\n"
-        f"## Original Content\n{content}\n"
-    )
-
-    write_note(
-        note_path,
-        frontmatter={
-            "source_type": "agent_saved",
-            "source": url,
-            "agent_reason": reason,
-            "date": today(),
-            "tags": data.get("tags", []),
-            "processed": True,
-        },
-        body=body,
-    )
-
-    # Index into the knowledge base
-    index_note(
-        note_title=title,
-        note_path=note_path,
-        summary=data.get("summary", reason),
-        tags=data.get("tags", []),
-    )
-
-    _sources_saved_this_run += 1
-    print(f"[source] Saved and indexed: {title}")
-    return f"Source saved as '{title}' and added to knowledge base."
-
-
 # ── Tool schema for Gemini ────────────────────────────────────────────────────
 
 TOOL_SCHEMA = [
     {
-        "name": "search_web",
+        "name": "search_arxiv",
         "description": (
-            "Search the web for information on a topic. "
-            "Use for finding current facts, recent developments, or overview information."
+            "Search arXiv for academic papers. Every result has a downloadable "
+            "full-text PDF. Best for STEM topics (CS, physics, math, stats, "
+            "quantitative biology/finance). Returns titles, authors, abstracts, and PDF URLs."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query. Be specific for better results."
-                }
+                "query": {"type": "string", "description": "The search query. Be specific."}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_openalex",
+        "description": (
+            "Search OpenAlex for academic papers across ALL disciplines. "
+            "Returns titles, authors, abstracts, and an open-access PDF URL when available "
+            "(not every paper has one). Use for broad scholarly coverage beyond arXiv."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query. Be specific."}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_web",
+        "description": (
+            "Search the general web for context, news, and authoritative non-academic "
+            "sources. Use to complement the academic searches, not replace them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query. Be specific."}
             },
             "required": ["query"],
         },
@@ -210,44 +205,58 @@ TOOL_SCHEMA = [
         "name": "fetch_url",
         "description": (
             "Fetch and read the full content of a specific web page. "
-            "Use when you have a URL from search results and need the full article."
+            "Use to evaluate a web page before deciding whether to queue it. "
+            "You do NOT need to fetch academic PDFs — queue_source retrieves their full text."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The full URL to fetch."
-                }
+                "url": {"type": "string", "description": "The full URL to fetch."}
             },
             "required": ["url"],
         },
     },
     {
-        "name": "save_source",
+        "name": "queue_source",
         "description": (
-            "Save a high-quality source permanently to the knowledge base. "
-            "Use this when a page contains genuinely valuable, non-duplicated information "
-            "that would be useful for future research. "
-            "Do NOT use for basic or low-quality pages. "
-            f"Maximum {MAX_SOURCES_PER_RUN} saves per research session."
+            "Queue a valuable source for full processing into the knowledge base. "
+            "Its full text is retrieved, analysed, and saved as an indexed clipping. "
+            "Queue as many sources as the topic genuinely needs — there is no limit. "
+            "Already-vaulted URLs are skipped automatically."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The URL of the source to save."
+                    "description": (
+                        "For papers: the PDF URL (or landing URL if no PDF). "
+                        "For web pages: the page URL."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": "A clean descriptive title for the source.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["pdf", "web"],
+                    "description": "'pdf' for academic papers, 'web' for general web pages.",
                 },
                 "reason": {
                     "type": "string",
+                    "description": "One sentence on the unique value this source provides.",
+                },
+                "abstract": {
+                    "type": "string",
                     "description": (
-                        "A one-sentence explanation of why this source is worth keeping. "
-                        "Be specific about what unique value it provides."
-                    )
+                        "The source's abstract or a representative snippet. Used as a "
+                        "fallback if the full text can't be retrieved (e.g. paywalled). "
+                        "Always provide it for papers."
+                    ),
                 },
             },
-            "required": ["url", "reason"],
+            "required": ["url", "title", "kind", "reason"],
         },
     },
 ]
@@ -255,11 +264,19 @@ TOOL_SCHEMA = [
 
 def execute_tool(name: str, args: dict) -> str:
     """Dispatch a tool call by name. Called by the research loop."""
-    if name == "search_web":
+    if name == "search_arxiv":
+        return search_arxiv_tool(args.get("query", ""))
+    elif name == "search_openalex":
+        return search_openalex_tool(args.get("query", ""))
+    elif name == "search_web":
         return search_web(args.get("query", ""))
     elif name == "fetch_url":
         return fetch_url(args.get("url", ""))
-    elif name == "save_source":
-        return save_source(args.get("url", ""), args.get("reason", ""))
+    elif name == "queue_source":
+        return queue_source(
+            args.get("url", ""), args.get("title", ""),
+            args.get("kind", "web"), args.get("reason", ""),
+            args.get("abstract", ""),
+        )
     else:
         return f"Unknown tool: {name}"

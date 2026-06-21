@@ -12,28 +12,32 @@ knowledge base:
 extension. The agent automatically summarises it, extracts key takeaways and
 tags, and indexes it into your vault.
 
-**Research mode** — Create a trigger note on your iPhone. The agent searches
-the web, reads full articles, saves high-quality sources it finds, and writes
-a comprehensive summary back to your vault.
+**Research mode** — Create a trigger note on your iPhone (or add a
+`> [!research]` callout to any note). The agent discovers academic papers
+(arXiv + OpenAlex) and authoritative web sources, retrieves their **full text**,
+runs each through the clip pipeline so it becomes an indexed clipping, then
+synthesises a long, detailed report that cites every source with `[[wikilinks]]`.
 
 Both pipelines maintain a set of **MOC notes** (Maps of Content) — topic-based
 index notes the agent builds and updates automatically. Over time the agent
 builds on prior knowledge rather than starting from scratch each time.
 
-Total cost: **$0**.
+Total cost: **$0** (Tavily and Gemini both have free tiers; arXiv + OpenAlex need no key).
 
 ---
 
 ## Stack
 
-| Component      | Choice                          | Why                                      |
-|----------------|---------------------------------|------------------------------------------|
-| Sync           | iCloud Drive                    | Native on iPhone, works on Surface       |
-| AI             | Gemini Flash (free tier)        | `gemini-3-flash-preview` + lite fallback |
-| Trigger        | Python watchdog on Surface      | Monitors vault for new notes             |
-| Web search     | DuckDuckGo (no key needed)      | Free, no signup                          |
-| Index          | Markdown MOCs in vault          | Obsidian-native, no extra tools          |
-| Web Clipper    | Obsidian Web Clipper extension  | Saves pages directly to vault            |
+| Component       | Choice                          | Why                                      |
+|-----------------|---------------------------------|------------------------------------------|
+| Sync            | iCloud Drive                    | Native on iPhone, works on Surface       |
+| AI              | Gemini Flash (free tier)        | `gemini-3-flash-preview` + lite fallback |
+| Trigger         | Python watchdog on Surface      | Monitors vault for new notes             |
+| Academic search | arXiv + OpenAlex (no key)       | Real papers with full-text PDFs          |
+| Full text       | PyMuPDF / pypdf                 | Extracts paper PDFs to text              |
+| Web search      | Tavily (free API key)           | Ranked web results built for LLM agents  |
+| Index           | Markdown MOCs in vault          | Obsidian-native, no extra tools          |
+| Web Clipper     | Obsidian Web Clipper extension  | Saves pages directly to vault            |
 
 ---
 
@@ -69,17 +73,20 @@ MyVault/
 ```
 obsidian_system/
 ├── prompts/
-│   ├── clip_system.md      ← System prompt for clip processing
-│   ├── clip_analysis.md    ← User prompt template for clip analysis
-│   └── research_system.md  ← System prompt for agentic research
+│   ├── clip_system.md         ← System prompt for clip processing
+│   ├── clip_analysis.md       ← User prompt template for clip analysis
+│   ├── research_system.md     ← System prompt for the discovery tool loop
+│   ├── research_synthesis.md  ← System prompt for report synthesis (draft/revise)
+│   └── research_critique.md   ← System prompt for the comprehensive critique pass
 └── src/
     ├── config.py            ← All settings (edit VAULT_PATH here)
     ├── notes.py             ← Read/write markdown note helpers
-    ├── gemini_client.py     ← Gemini API wrapper with fallback + retry
-    ├── indexer.py           ← MOC creation and maintenance
-    ├── web_tools.py         ← search_web, fetch_url, save_source tools
+    ├── gemini_client.py     ← Gemini API wrapper with fallback + retry; tool loop
+    ├── indexer.py           ← MOC creation/maintenance; find_relevant_clippings
+    ├── academic.py          ← arXiv + OpenAlex search; PDF download + full-text extract
+    ├── web_tools.py         ← search_arxiv/openalex/web, fetch_url, queue_source tools
     ├── clipper.py           ← Web Clipper note processing pipeline
-    ├── researcher.py        ← Agentic research pipeline
+    ├── researcher.py        ← Research pipeline (discovery → process → synthesis) + callouts
     ├── pdf_processor.py     ← PDF text extraction + summarisation
     ├── obsidian_watchdog.py ← Main entry point, file system monitor
     ├── reset_clips.py       ← Standalone script to revert clips to original
@@ -116,23 +123,48 @@ obsidian_system/
 1. You create a trigger note on iPhone in _triggers/:
       research: true
       topic: "quantum computing breakthroughs"
-      depth: standard   # or deep
-      urls:             # optional seed URLs
+      depth: comprehensive   # standard | deep | comprehensive
+      urls:                  # optional seed URLs
         - https://...
-2. iCloud syncs to Surface
-3. obsidian_watchdog.py detects new file in _triggers/
-4. researcher.py checks existing MOCs for prior context on this topic
-5. Gemini enters agentic tool loop:
-      → calls search_web("quantum computing 2025")
-      → calls fetch_url("https://...")
-      → calls save_source("https://...", "reason") ← NEW
-        (saves valuable sources to Sources/, indexes them)
-      → repeats until satisfied
-6. Gemini writes final markdown summary
-7. Summary saved to Research/Research - Topic.md
-8. Research note indexed into relevant MOC
-9. Trigger note marked research: done
+2. iCloud syncs to Surface; obsidian_watchdog.py detects it
+3. researcher.process_research_trigger() runs four phases:
+
+   ① find_relevant_clippings(topic) — Gemini reads the MOC catalog
+      (title + one-line summary per note) and picks the relevant ones.
+   ② Discovery tool loop (gemini_tool_loop) — the agent calls
+      search_arxiv / search_openalex / search_web / fetch_url, then
+      queue_source(url, title, kind, reason, abstract) for each keeper.
+      No source cap; already-vaulted URLs are skipped.
+   ③ _process_source() for each queued source:
+      - pdf  → academic.extract_paper_text() downloads the PDF and
+               extracts full text (falls back to landing-page scrape)
+      - web  → web_tools.fetch_url()
+      - on failure with an abstract → abstract-only clip (full_text: false)
+      The text is written to Clippings/ (source_type: research_found) and
+      run through clipper.process_clipped_note() → indexed into a MOC.
+   ④ _synthesise() — builds a source index of exact [[wikilink]] titles
+      and writes the report. standard/deep = single draft; comprehensive =
+      draft → critique (research_critique) → revise. Broken wikilinks are
+      logged via _validate_wikilinks().
+
+4. Report saved to Research/Research - Topic.md, indexed into a MOC,
+   trigger marked research: done.
 ```
+
+### Inline Research Callouts
+
+Add `> [!research] your question` anywhere in an existing note. On the next
+periodic rescan, `find_research_callouts()` (scanning Clippings/, Research/,
+Sources/) picks it up and `process_research_callout()`:
+
+1. Replaces the callout with `> [!info] Researching: …` immediately, so the
+   next rescan won't double-process it.
+2. Runs the same four-phase pipeline at `standard` depth.
+3. Replaces the marker in place with a `> [!done]` callout followed by the
+   findings — appended inline, no separate note created.
+
+If the process dies mid-research the note is left with the `> [!info]` marker
+(not retried) — a known limitation.
 
 ### Reset Clips
 
@@ -161,19 +193,25 @@ one-line summary, and MOC assignment are regenerated. The flag is consumed
 (popped) on the first reprocess and never persists. Brand-new clips (no flag)
 are renamed to their clean Gemini title as usual.
 
-### save_source (new in v3)
+### Discovery tools & queue_source
 
-During research, Gemini has access to a third tool: `save_source(url, reason)`.
+During phase ② the agent has five tools (`src/web_tools.py`, `src/academic.py`):
 
-When the agent finds a page it judges genuinely valuable — not just relevant,
-but worth keeping — it calls this tool with the URL and a one-sentence reason.
-Your script then:
-- Fetches the full page content
-- Asks Gemini to summarise it (same as the clip pipeline)
-- Saves it to Sources/ with the agent's reason in the frontmatter
-- Indexes it into the same MOC system as clipped notes
+| Tool | Purpose |
+|------|---------|
+| `search_arxiv(query)`    | arXiv papers — every result has a full-text PDF |
+| `search_openalex(query)` | OpenAlex papers, all disciplines — OA PDF when available |
+| `search_web(query)`      | Tavily web search (skipped with a clear message if no key) |
+| `fetch_url(url)`         | Read a web page to evaluate it |
+| `queue_source(url, title, kind, reason, abstract)` | Mark a source for processing |
 
-Capped at 5 saves per research run to prevent the agent saving everything.
+`queue_source` dedups against the vault and the current queue; there is **no
+count cap** — the agent queues as many sources as the topic needs. The
+`abstract` argument is kept as a fallback so a source survives as an
+abstract-only clipping (`full_text: false`) when its full text can't be
+retrieved (e.g. paywalled PDFs). Queued sources are processed in phase ③ and
+become ordinary indexed clippings in `Clippings/` (tagged
+`source_type: research_found`), so they're reusable by future research.
 
 ### Vault Linting
 
@@ -247,16 +285,17 @@ Create this in `_triggers/` from your iPhone:
 ---
 research: true
 topic: "quantum computing breakthroughs 2025"
-depth: standard
+depth: comprehensive
 urls:
   - https://specific-article.com/to-include
 output: "Research - Quantum Computing.md"
 ---
 ```
 
-`depth` controls how thorough the agent is:
-- `standard` — 3-6 searches, 1-3 saved sources
-- `deep` — 6-12 searches, 3-5 saved sources
+`depth` controls how thorough discovery is (source count is up to the agent):
+- `standard` — ~4-6 searches, single-draft synthesis
+- `deep` — ~8-12 searches, single-draft synthesis
+- `comprehensive` — ~12-20 searches, draft → critique → revise synthesis
 
 ---
 
@@ -298,16 +337,19 @@ after the agent has processed the note so it never gets processed twice.
 ### 2. Gemini API Key
 - Go to https://aistudio.google.com
 - Click "Get API key" → Create API key (no credit card needed)
-- Set as an environment variable on your Surface:
+- Set environment variables on your Surface (or put them in `.env`):
   ```
   setx GEMINI_API_KEY "your-key-here"
+  setx TAVILY_API_KEY "your-tavily-key"   # free tier at https://tavily.com
   ```
-  Restart your terminal after running this.
+  Restart your terminal after running this. `TAVILY_API_KEY` is optional —
+  without it, research falls back to the academic sources only.
 
 ### 3. Python Dependencies
 ```bash
-pip install google-genai watchdog PyYAML requests python-dotenv pymupdf
+pip install -r requirements.txt
 ```
+(`google-genai`, `watchdog`, `PyYAML`, `requests`, `python-dotenv`, `pymupdf`, `feedparser`)
 
 ### 4. Configure the Script
 Edit `src/config.py` — update `VAULT_PATH` to match your actual vault location.
@@ -369,14 +411,15 @@ Month 2
 
 | Resource             | Limit          | Your likely usage  |
 |----------------------|----------------|--------------------|
-| Gemini requests      | 1,500/day      | 10–30/day          |
-| DuckDuckGo searches  | Unlimited      | Free               |
+| Gemini requests      | 1,500/day      | research is call-heavy: relevance + discovery loop + N source analyses + synthesis (a few comprehensive runs can exhaust the free daily quota) |
+| arXiv / OpenAlex     | Unlimited      | Free, no key       |
+| Tavily searches      | ~1,000/month   | Free tier          |
 | iCloud sync          | 5 GB free      | Well within limits |
-| Web Clipper          | Free           | Free               |
 
 The script automatically falls back from `gemini-3-flash-preview` →
 `gemini-3.1-flash-lite-preview` if a model's daily quota is hit (see
-`GEMINI_MODELS` in `config.py`).
+`GEMINI_MODELS` in `config.py`). Note `thinking_level` is `high` on every call
+(`config.py`); lowering it for the per-source analysis steps would cut quota use.
 
 ---
 
@@ -384,8 +427,8 @@ The script automatically falls back from `gemini-3-flash-preview` →
 
 | When                             | Upgrade                                              |
 |----------------------------------|------------------------------------------------------|
-| DuckDuckGo results are too thin  | Add SerpAPI free tier (100 searches/day)             |
-| Want richer search               | Use Gemini built-in grounding for some queries       |
+| Hitting the Gemini daily quota   | Paid Gemini key, or lower `thinking_level` for per-source analysis |
+| Want more paywalled full text    | Add an Unpaywall / institutional resolver to `academic.py` |
 | Privacy concerns about free tier | Point at local Ollama model instead of Gemini        |
 | Want semantic search             | Add ChromaDB + embeddings alongside the MOCs         |
 | Want iPhone web trigger          | Add small Flask endpoint that creates trigger notes  |

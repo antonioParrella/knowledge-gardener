@@ -4,3 +4,4 @@ PyYAML
 requests
 python-dotenv
 pymupdf
+feedparser

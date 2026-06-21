@@ -30,6 +30,10 @@ PDF_ARCHIVE_PATH = Path(r"C:\Users\parre\PDFArchive")
 # ── API ───────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+# Tavily web search (free tier at tavily.com). If unset, web search is skipped
+# and discovery relies on the academic APIs only.
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+
 # Models to try in order if rate limits are hit
 GEMINI_MODELS = [
     "gemini-3-flash-preview",
@@ -38,11 +42,17 @@ GEMINI_MODELS = [
 
 GEMINI_THINKING_LEVEL = "high"  # "minimal" | "low" | "medium" | "high"
 
+# ── Academic search endpoints (no API key required) ─────────────────────────────
+ARXIV_API_URL    = "http://export.arxiv.org/api/query"
+OPENALEX_API_URL = "https://api.openalex.org/works"
+TAVILY_API_URL   = "https://api.tavily.com/search"
+
 # ── Research settings ─────────────────────────────────────────────────────────
-MAX_SEARCH_ITERATIONS  = 15    # max tool call loops per research run
-MAX_SOURCES_PER_RUN    = 5     # max sources agent can save per research run
+MAX_SEARCH_ITERATIONS  = 30    # max tool-call loops per research run (safety bound)
 FETCH_CONTENT_LIMIT    = 8000  # max chars from a fetched URL
 CLIP_CONTENT_LIMIT     = 12000 # max chars from a clipped note
+PAPER_CONTENT_LIMIT    = 40000 # max chars sent to clip-analysis for full-text papers
+SYNTHESIS_RAW_EXCERPT  = 15000 # max raw chars per source passed to report synthesis
 ICLOUD_SETTLE_SECS     = 3     # seconds to wait after file created before processing
 
 # ── Prompt files ───────────────────────────────────────────────────────────────

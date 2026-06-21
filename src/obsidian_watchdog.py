@@ -24,12 +24,14 @@ from watchdog.events import FileSystemEventHandler
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    VAULT_PATH, INBOX_PATH, TRIGGERS_PATH, ALL_PATHS,
+    VAULT_PATH, INBOX_PATH, TRIGGERS_PATH, RESEARCH_PATH, SOURCES_PATH, ALL_PATHS,
     ICLOUD_SETTLE_SECS, WATCH_RECURSIVE, GEMINI_API_KEY, RESCAN_INTERVAL_SECS,
     PDF_INBOX_PATH, PDF_ARCHIVE_PATH,
 )
 from clipper import process_clipped_note, find_unprocessed_clips
-from researcher import process_research_trigger
+from researcher import (
+    process_research_trigger, find_research_callouts, process_research_callout,
+)
 from pdf_processor import process_pdf, find_unprocessed_pdfs
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -193,6 +195,15 @@ def main():
                         process_pdf(path)
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
+                    time.sleep(3)
+                for cpath, ctopic in find_research_callouts(
+                    [INBOX_PATH, RESEARCH_PATH, SOURCES_PATH]
+                ):
+                    try:
+                        log.info(f"Processing callout: '{ctopic}' in {cpath.name}")
+                        process_research_callout(cpath, ctopic)
+                    except Exception as e:
+                        log.error(f"Callout error in {cpath.name}: {e}")
                     time.sleep(3)
     except KeyboardInterrupt:
         log.info("Stopping...")
