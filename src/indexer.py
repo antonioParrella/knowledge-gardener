@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from notes import read_note, write_note, today
 from llm import llm_simple, parse_json_response
-from config import INDEX_PATH, INBOX_PATH, SOURCES_PATH
+from config import INDEX_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
 
 # Matches a MOC note entry: "- [[Title]] — summary" (em-dash or hyphen separator).
 _MOC_ENTRY_RE = re.compile(r"-\s*\[\[([^\]|#]+)\]\]\s*(?:[—-]\s*(.*))?$")
@@ -57,25 +57,14 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
     existing = get_existing_mocs()
     response = llm_simple(
         task="moc",
-        prompt=(
-            f"Note title: {note_title}\n"
-            f"Summary: {summary[:400]}\n"
-            f"Tags: {', '.join(tags)}\n\n"
-            f"Existing MOCs:\n{existing}\n\n"
-            "Which MOC should this note go in?\n"
-            "Output ONLY the topic name — nothing else. No bullet points, no explanation, no reasoning.\n"
-            "One or two words, title case. Use an existing MOC name if it fits, or suggest a new short name.\n"
-            "Each MOC represents a sub-field, not a broad domain. "
-            "For example, 'Health' is too broad — use things like 'Resistance Training', 'Addiction', or 'Vaccines' instead. "
-            "'AI' is too broad — use things like 'LLM Training', 'Diffusion Models', 'World Models', or 'Mechanistic Interpretability' instead. "
-            "Examples of good MOC names: LLM Training, Generative Models, Mechanistic Interpretability, ML Theory, "
-            "AI Consciousness, Representation Learning, Resistance Training, Addiction, Vaccines, "
-            "Options Pricing, Equity Valuation, Neuroscience, Habit Formation"
+        prompt=load_prompt(
+            "moc_assign",
+            note_title=note_title,
+            summary=summary[:400],
+            tags=", ".join(tags),
+            existing=existing,
         ),
-        system=(
-            "You manage a personal knowledge base. "
-            "Assign notes to topic MOCs."
-        )
+        system=load_prompt("moc_assign_system"),
     )
     topic = response.strip().strip("'\".,")
     if len(topic) > 40 or "\n" in topic:
