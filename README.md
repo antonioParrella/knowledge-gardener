@@ -11,7 +11,7 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 ## Stack
 
 - **Sync**: iCloud Drive (native on iPhone, works on Surface)
-- **AI**: Gemini Flash (`gemini-3-flash-preview` → `gemini-3.1-flash-lite-preview` fallback)
+- **AI**: per-task routing (`src/llm.py`) — free Gemini Flash for clips/MOCs (falling back to DeepSeek V4 Flash via OpenRouter when the daily quota is hit); research on DeepSeek V4 Pro at max reasoning via OpenRouter (falling back to free Gemini Flash)
 - **Trigger**: Python watchdog on Surface
 - **Academic search**: arXiv + OpenAlex (no key needed); full-text PDFs via PyMuPDF
 - **Web search**: Tavily (free API key)
@@ -21,10 +21,11 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 
 1. Install iCloud for Windows and move your Obsidian vault to iCloud Drive
 2. Get a Gemini API key from https://aistudio.google.com and set `GEMINI_API_KEY`
-3. Get a free Tavily key from https://tavily.com and set `TAVILY_API_KEY` (optional — without it, research uses the academic sources only)
-4. Install dependencies: `pip install -r requirements.txt`
-5. Configure `src/config.py` with your vault path
-6. Run: `python src/obsidian_watchdog.py`
+3. Get an OpenRouter key from https://openrouter.ai/keys and set `OPENROUTER_API_KEY` (optional — without it everything runs on Gemini and research quality reverts to free Gemini Flash)
+4. Get a free Tavily key from https://tavily.com and set `TAVILY_API_KEY` (optional — without it, research uses the academic sources only)
+5. Install dependencies: `pip install -r requirements.txt`
+6. Configure `src/config.py` with your vault path
+7. Run: `python src/obsidian_watchdog.py`
 
 ## Vault Structure
 
@@ -60,13 +61,25 @@ urls:                  # optional seed URLs
 
 ### Inline research callouts
 
-Add a callout anywhere in an existing note and save:
+Add a callout anywhere in **any** note in your vault and save:
 
 ```markdown
 > [!research] How does X compare to Y?
 ```
 
-On the next scan the agent researches it and replaces the callout in place with a `> [!done]` marker followed by the findings — no separate note needed.
+On the next scan the agent researches it and replaces the callout **in place** with a `> [!done]` marker followed by the findings — appended to the same note, like a review comment, with no separate note created. The agent reads the **full text of the note** the callout lives in and uses a dedicated prompt (`prompts/research_callout.md`) to answer the question *as it applies to that note* — so `> [!research] which is more reliable?` inside a note comparing two vendors actually researches those vendors, not the literal phrase.
+
+### LLM routing & cost
+
+Calls are routed per task in `src/config.py` (`ROUTING`) through `src/llm.py`, which walks a fallback chain per task:
+
+| Task | Primary | Fallback |
+|------|---------|----------|
+| clip / PDF summaries | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
+| MOC assignment | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
+| research (discovery + synthesis) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
+
+Free Gemini Flash carries the high-volume cheap tasks until its daily quota is hit, then DeepSeek V4 Flash (via OpenRouter) takes over with no quota cliff. Research runs on DeepSeek V4 Pro at max reasoning — frontier-class synthesis for ~$1–2/month at typical volume. Re-routing a task or adding a provider is a one-line edit to `ROUTING`.
 
 ## MOCs: Specific Sub-Fields, Not Broad Domains
 

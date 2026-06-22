@@ -196,9 +196,9 @@ def main():
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
                     time.sleep(3)
-                for cpath, ctopic in find_research_callouts(
-                    [INBOX_PATH, RESEARCH_PATH, SOURCES_PATH]
-                ):
+                # Callouts can live in ANY note in the vault — they're answered
+                # in place, like a review comment (see find_research_callouts).
+                for cpath, ctopic in find_research_callouts([VAULT_PATH]):
                     try:
                         log.info(f"Processing callout: '{ctopic}' in {cpath.name}")
                         process_research_callout(cpath, ctopic)

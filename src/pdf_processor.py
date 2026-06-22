@@ -15,7 +15,7 @@ from pathlib import Path
 
 from config import PDF_ARCHIVE_PATH, INBOX_PATH, CLIP_CONTENT_LIMIT, load_prompt
 from notes import write_note, safe_filename, today
-from gemini_client import gemini_simple, parse_json_response
+from llm import llm_simple, parse_json_response
 from indexer import index_note
 
 
@@ -72,7 +72,7 @@ def process_pdf(path: Path):
     system_prompt = load_prompt("clip_system")
     user_prompt = load_prompt("clip_analysis", source_url=path.name, content=content)
 
-    result_text = gemini_simple(prompt=user_prompt, system=system_prompt)
+    result_text = llm_simple(prompt=user_prompt, system=system_prompt, task="clip")
 
     data = parse_json_response(result_text)
     if not data:

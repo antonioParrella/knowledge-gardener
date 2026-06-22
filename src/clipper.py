@@ -14,7 +14,7 @@ from pathlib import Path
 
 from config import CLIP_CONTENT_LIMIT, VAULT_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
 from notes import read_note, write_note, safe_filename, today
-from gemini_client import gemini_simple, parse_json_response
+from llm import llm_simple, parse_json_response
 from indexer import index_note
 
 
@@ -120,9 +120,10 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     system_prompt = load_prompt("clip_system")
     user_prompt = load_prompt("clip_analysis", source_url=source_url, content=content)
 
-    result_text = gemini_simple(
+    result_text = llm_simple(
         prompt=user_prompt,
         system=system_prompt,
+        task="clip",
     )
 
     data = parse_json_response(result_text)

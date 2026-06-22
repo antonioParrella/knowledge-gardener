@@ -4,10 +4,21 @@ Edit VAULT_PATH to point at your iCloud vault before running.
 """
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Model output is full of unicode (em-dashes, math symbols like ∈, …). On Windows
+# stdout defaults to cp1252, so printing such text raises UnicodeEncodeError — which,
+# inside a provider tool loop, would abort an entire research run. Force UTF-8 with
+# replacement so logging can never crash the pipeline. Imported by every module.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # ── Vault paths ───────────────────────────────────────────────────────────────
 # Update this to your actual iCloud vault location
@@ -30,6 +41,11 @@ PDF_ARCHIVE_PATH = Path(r"C:\Users\parre\PDFArchive")
 # ── API ───────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+# OpenRouter (OpenAI-compatible gateway). Optional — if unset, the router skips
+# OpenRouter entries in the routing chain and falls back to Gemini.
+OPENROUTER_API_KEY  = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 # Tavily web search (free tier at tavily.com). If unset, web search is skipped
 # and discovery relies on the academic APIs only.
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
@@ -41,6 +57,36 @@ GEMINI_MODELS = [
 ]
 
 GEMINI_THINKING_LEVEL = "high"  # "minimal" | "low" | "medium" | "high"
+
+# ── LLM routing ─────────────────────────────────────────────────────────────────
+# Per-task provider chains. Each task maps to an ordered list of
+# (provider, model, opts); the router (llm.py) tries each in turn, falling
+# through on quota exhaustion / errors. Keep the cheap/free option first.
+#
+#   clip / moc → free Gemini Flash first, then DeepSeek V4 Flash via OpenRouter
+#                (better than Flash-Lite, no quota cliff) for ~cents.
+#   research   → DeepSeek V4 Pro at max reasoning via OpenRouter (frontier-class,
+#                ~1/15th Opus cost), falling back to free Gemini Flash (tool-capable).
+# Reasoning opt is OpenRouter's normalized effort (minimal/low/medium/high/xhigh;
+# "xhigh" = max — OpenRouter rejects the literal "max").
+GEMINI_FLASH = "gemini-3-flash-preview"
+OR_FLASH     = "deepseek/deepseek-v4-flash"
+OR_PRO       = "deepseek/deepseek-v4-pro"
+
+ROUTING = {
+    "clip": [
+        ("gemini",     GEMINI_FLASH, {}),
+        ("openrouter", OR_FLASH,     {}),
+    ],
+    "moc": [
+        ("gemini",     GEMINI_FLASH, {}),
+        ("openrouter", OR_FLASH,     {}),
+    ],
+    "research": [
+        ("openrouter", OR_PRO,       {"reasoning_effort": "xhigh"}),
+        ("gemini",     GEMINI_FLASH, {}),
+    ],
+}
 
 # ── Academic search endpoints (no API key required) ─────────────────────────────
 ARXIV_API_URL    = "http://export.arxiv.org/api/query"
