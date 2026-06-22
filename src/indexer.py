@@ -12,7 +12,7 @@ import re
 import time
 from pathlib import Path
 from notes import read_note, write_note, today
-from gemini_client import gemini_simple, parse_json_response
+from llm import llm_simple, parse_json_response
 from config import INDEX_PATH, INBOX_PATH, SOURCES_PATH
 
 # Matches a MOC note entry: "- [[Title]] — summary" (em-dash or hyphen separator).
@@ -55,7 +55,8 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
     Returns the MOC topic name (e.g. 'AI', 'Programming').
     """
     existing = get_existing_mocs()
-    response = gemini_simple(
+    response = llm_simple(
+        task="moc",
         prompt=(
             f"Note title: {note_title}\n"
             f"Summary: {summary[:400]}\n"
@@ -222,7 +223,8 @@ def find_relevant_clippings(topic: str) -> list[dict]:
         return []
 
     catalog_text = "\n".join(f"- {title} — {summary}" for title, summary in catalog)
-    response = gemini_simple(
+    response = llm_simple(
+        task="moc",
         prompt=(
             f"Research topic: {topic}\n\n"
             f"Existing notes in the knowledge base:\n{catalog_text}\n\n"

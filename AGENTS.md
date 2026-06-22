@@ -31,7 +31,7 @@ Total cost: **$0** (Tavily and Gemini both have free tiers; arXiv + OpenAlex nee
 | Component       | Choice                          | Why                                      |
 |-----------------|---------------------------------|------------------------------------------|
 | Sync            | iCloud Drive                    | Native on iPhone, works on Surface       |
-| AI              | Gemini Flash (free tier)        | `gemini-3-flash-preview` + lite fallback |
+| AI              | Gemini Flash (free) + OpenRouter | Per-task routing; research on DeepSeek V4 Pro (max reasoning) via OpenRouter |
 | Trigger         | Python watchdog on Surface      | Monitors vault for new notes             |
 | Academic search | arXiv + OpenAlex (no key)       | Real papers with full-text PDFs          |
 | Full text       | PyMuPDF / pypdf                 | Extracts paper PDFs to text              |
@@ -77,11 +77,17 @@ obsidian_system/
 │   ├── clip_analysis.md       ← User prompt template for clip analysis
 │   ├── research_system.md     ← System prompt for the discovery tool loop
 │   ├── research_synthesis.md  ← System prompt for report synthesis (draft/revise)
-│   └── research_critique.md   ← System prompt for the comprehensive critique pass
+│   ├── research_critique.md   ← System prompt for the comprehensive critique pass
+│   └── research_callout.md    ← System prompt for inline [!research] callout answers
 └── src/
     ├── config.py            ← All settings (edit VAULT_PATH here)
     ├── notes.py             ← Read/write markdown note helpers
-    ├── gemini_client.py     ← Gemini API wrapper with fallback + retry; tool loop
+    ├── llm.py               ← Task-routed LLM facade (llm_simple / llm_tool_loop)
+    ├── providers/           ← Per-provider impls behind a common interface
+    │   ├── base.py          ← Provider ABC, control-flow exceptions, parse_json_response
+    │   ├── gemini.py        ← Gemini provider (google-genai); fallback + retry; tool loop
+    │   └── openrouter.py    ← OpenRouter provider (openai SDK); reasoning + tool loop
+    ├── gemini_client.py     ← Backward-compat shim → llm.py
     ├── indexer.py           ← MOC creation/maintenance; find_relevant_clippings
     ├── academic.py          ← arXiv + OpenAlex search; PDF download + full-text extract
     ├── web_tools.py         ← search_arxiv/openalex/web, fetch_url, queue_source tools
@@ -153,18 +159,29 @@ obsidian_system/
 
 ### Inline Research Callouts
 
-Add `> [!research] your question` anywhere in an existing note. On the next
-periodic rescan, `find_research_callouts()` (scanning Clippings/, Research/,
-Sources/) picks it up and `process_research_callout()`:
+Add `> [!research] your question` anywhere in **any** note in the vault. On the
+next periodic rescan, `find_research_callouts()` — which scans the whole vault
+recursively (`VAULT_PATH`), skipping `_triggers/`, `.obsidian/`, `.trash/` —
+picks it up and `process_research_callout()`:
 
-1. Replaces the callout with `> [!info] Researching: …` immediately, so the
+1. Captures the **full text of the host note** (callout line stripped) as
+   document context.
+2. Replaces the callout with `> [!info] Researching: …` immediately, so the
    next rescan won't double-process it.
-2. Runs the same four-phase pipeline at `standard` depth.
-3. Replaces the marker in place with a `> [!done]` callout followed by the
-   findings — appended inline, no separate note created.
+3. Runs the four-phase pipeline at `standard` depth, passing the note context
+   into both discovery and synthesis. Synthesis uses the dedicated
+   `research_callout` prompt, so the agent answers the question *as it applies to
+   that note* (resolving references like "our two options" against the note)
+   rather than researching the literal phrase.
+4. Replaces the marker in place with a `> [!done]` callout followed by the
+   findings — appended inline to the same note, like a review comment, no
+   separate note created.
 
 If the process dies mid-research the note is left with the `> [!info]` marker
 (not retried) — a known limitation.
+
+Trigger notes (`_triggers/`) deliberately do **not** pass document context — they
+use the generic `research_synthesis` prompt and write a standalone `Research/` note.
 
 ### Reset Clips
 
@@ -340,16 +357,19 @@ after the agent has processed the note so it never gets processed twice.
 - Set environment variables on your Surface (or put them in `.env`):
   ```
   setx GEMINI_API_KEY "your-key-here"
-  setx TAVILY_API_KEY "your-tavily-key"   # free tier at https://tavily.com
+  setx TAVILY_API_KEY "your-tavily-key"         # free tier at https://tavily.com
+  setx OPENROUTER_API_KEY "your-openrouter-key" # https://openrouter.ai/keys
   ```
   Restart your terminal after running this. `TAVILY_API_KEY` is optional —
-  without it, research falls back to the academic sources only.
+  without it, research falls back to the academic sources only. `OPENROUTER_API_KEY`
+  is optional too — without it the router skips OpenRouter and uses Gemini for every
+  task (research quality reverts to free Gemini Flash).
 
 ### 3. Python Dependencies
 ```bash
 pip install -r requirements.txt
 ```
-(`google-genai`, `watchdog`, `PyYAML`, `requests`, `python-dotenv`, `pymupdf`, `feedparser`)
+(`google-genai`, `openai`, `watchdog`, `PyYAML`, `requests`, `python-dotenv`, `pymupdf`, `feedparser`)
 
 ### 4. Configure the Script
 Edit `src/config.py` — update `VAULT_PATH` to match your actual vault location.
@@ -416,10 +436,26 @@ Month 2
 | Tavily searches      | ~1,000/month   | Free tier          |
 | iCloud sync          | 5 GB free      | Well within limits |
 
-The script automatically falls back from `gemini-3-flash-preview` →
-`gemini-3.1-flash-lite-preview` if a model's daily quota is hit (see
-`GEMINI_MODELS` in `config.py`). Note `thinking_level` is `high` on every call
-(`config.py`); lowering it for the per-source analysis steps would cut quota use.
+### LLM routing
+
+Calls are routed per task through `llm.py` using the `ROUTING` map in `config.py`.
+Each task has an ordered chain of `(provider, model, opts)`; the router tries each
+in turn, falling through on daily-quota exhaustion or provider errors (an unset
+`DEEPSEEK_API_KEY` counts as "unavailable", so DeepSeek entries are skipped).
+
+| Task (call site) | Primary | Fallback |
+|------------------|---------|----------|
+| `clip` — clip/PDF summaries (`clipper.py`, `pdf_processor.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
+| `moc` — MOC assignment + relevance (`indexer.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
+| `research` — discovery loop + synthesis (`researcher.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
+
+Free Gemini Flash carries the high-volume cheap tasks until its daily quota is
+hit, then DeepSeek V4 Flash (via OpenRouter) takes over (better than Flash-Lite,
+no quota cliff, ~cents). Research runs on DeepSeek V4 Pro at OpenRouter's
+normalized `reasoning={"effort": "xhigh"}` — frontier-class synthesis at ~1/15th
+of an Opus-tier model. The paid models go through one OpenRouter key
+(`OPENROUTER_API_KEY`); adding a provider or re-routing a task is a one-line edit
+to `ROUTING`. Note `thinking_level` is `high` on every Gemini call (`config.py`).
 
 ---
 

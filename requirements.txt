@@ -1,4 +1,5 @@
 google-genai
+openai
 watchdog
 PyYAML
 requests

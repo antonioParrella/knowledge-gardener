@@ -20,7 +20,7 @@ from config import (
     load_prompt,
 )
 from notes import read_note, write_note, safe_filename, today
-from gemini_client import gemini_simple, gemini_tool_loop
+from llm import llm_simple, llm_tool_loop
 from web_tools import TOOL_SCHEMA, execute_tool, reset_queue, get_queue
 from academic import extract_paper_text
 from clipper import process_clipped_note, find_existing_source
@@ -30,8 +30,17 @@ from indexer import index_note, get_prior_context, find_relevant_clippings
 # ── Phase 2 helpers — discovery prompt ──────────────────────────────────────────
 
 def _build_discovery_prompt(topic: str, depth: str, seed_urls: list[str],
-                            existing: list[dict]) -> str:
+                            existing: list[dict], context: str = "") -> str:
     parts = [f"Research this topic:\n\n**{topic}**", f"Depth: {depth}"]
+
+    if context:
+        parts.append(
+            "## The note this question appears in (for context)\n"
+            "The question above was written as an inline callout inside this note. "
+            "Use it to understand what the user is really asking and to guide your "
+            "searches; resolve any references in the question against it.\n\n"
+            + context[:CLIP_CONTENT_LIMIT]
+        )
 
     if existing:
         known = "\n".join(f"- [[{c['title']}]]" for c in existing)
@@ -147,8 +156,15 @@ def _build_source_block(sources: list[dict]) -> tuple[str, set[str]]:
     return "\n\n".join(lines), valid_titles
 
 
-def _synthesise(topic: str, sources: list[dict], depth: str) -> str:
-    """Write the report. Comprehensive depth runs draft → critique → revise."""
+def _synthesise(topic: str, sources: list[dict], depth: str,
+                context: str = "", system_name: str = "research_synthesis") -> str:
+    """
+    Write the report. Comprehensive depth runs draft → critique → revise.
+
+    When `context` is supplied (inline callouts), the host note is included in the
+    prompt and `system_name` selects the callout-aware synthesis prompt so the
+    model answers the question as it applies to that note.
+    """
     if not sources:
         return (
             f"# {topic}\n\nNo sources were found or available to synthesise a report "
@@ -158,24 +174,35 @@ def _synthesise(topic: str, sources: list[dict], depth: str) -> str:
     source_block, valid_titles = _build_source_block(sources)
     index_titles = "\n".join(f"{i}. [[{s['title']}]]" for i, s in enumerate(sources, 1))
 
-    base = (
-        f"# Research topic\n{topic}\n\n"
-        f"# Source index (cite using these EXACT wikilink titles)\n{index_titles}\n\n"
-        f"# Sources with analysis\n{source_block}"
-    )
+    if context:
+        base = (
+            f"# Question\n{topic}\n\n"
+            f"# The note this question appears in (full context — tailor your answer to it)\n"
+            f"{context[:CLIP_CONTENT_LIMIT]}\n\n"
+            f"# Source index (cite using these EXACT wikilink titles)\n{index_titles}\n\n"
+            f"# Sources with analysis\n{source_block}"
+        )
+    else:
+        base = (
+            f"# Research topic\n{topic}\n\n"
+            f"# Source index (cite using these EXACT wikilink titles)\n{index_titles}\n\n"
+            f"# Sources with analysis\n{source_block}"
+        )
 
-    synthesis_system = load_prompt("research_synthesis")
-    draft = gemini_simple(prompt=base, system=synthesis_system)
+    synthesis_system = load_prompt(system_name)
+    draft = llm_simple(prompt=base, system=synthesis_system, task="research")
 
     if depth != "comprehensive":
         return draft
 
     print("[research] Comprehensive depth — running critique + revise pass")
-    critique = gemini_simple(
+    critique = llm_simple(
         prompt=f"{base}\n\n# Draft report\n{draft}",
         system=load_prompt("research_critique"),
+        task="research",
     )
-    revised = gemini_simple(
+    revised = llm_simple(
+        task="research",
         prompt=(
             f"{base}\n\n# Current draft\n{draft}\n\n"
             f"# Reviewer critique to address\n{critique}\n\n"
@@ -197,10 +224,16 @@ def _validate_wikilinks(report: str, valid_titles: set[str]):
 
 # ── Core pipeline ────────────────────────────────────────────────────────────────
 
-def _run_research(topic: str, depth: str, seed_urls: list[str]) -> tuple[str, list[dict]]:
+def _run_research(topic: str, depth: str, seed_urls: list[str],
+                  context: str = "",
+                  synthesis_system_name: str = "research_synthesis") -> tuple[str, list[dict]]:
     """
     Run phases ①–④ for a topic. Returns (report_markdown, all_sources).
     Shared by both trigger notes and inline callouts.
+
+    `context` (the host note's full text) and `synthesis_system_name` are set by
+    inline callouts so discovery and synthesis are grounded in the document the
+    callout lives in.
     """
     reset_queue()
 
@@ -210,12 +243,13 @@ def _run_research(topic: str, depth: str, seed_urls: list[str]) -> tuple[str, li
         print(f"[research] Found {len(existing)} relevant existing clipping(s).")
 
     # ② Discovery tool loop
-    prompt = _build_discovery_prompt(topic, depth, seed_urls, existing)
-    gemini_tool_loop(
+    prompt = _build_discovery_prompt(topic, depth, seed_urls, existing, context=context)
+    llm_tool_loop(
         prompt=prompt,
         system=load_prompt("research_system"),
         tool_schema=TOOL_SCHEMA,
         tool_executor=execute_tool,
+        task="research",
     )
 
     # ③ Process queued sources into indexed clippings
@@ -228,7 +262,8 @@ def _run_research(topic: str, depth: str, seed_urls: list[str]) -> tuple[str, li
 
     # ④ Synthesis
     all_sources = existing + newly
-    report = _synthesise(topic, all_sources, depth)
+    report = _synthesise(topic, all_sources, depth,
+                         context=context, system_name=synthesis_system_name)
     _, valid_titles = _build_source_block(all_sources)
     _validate_wikilinks(report, valid_titles)
 
@@ -292,14 +327,29 @@ def process_research_trigger(path: Path):
 
 _CALLOUT_RE = re.compile(r"^>\s*\[!research\]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
+# Folders skipped when scanning the vault for callouts: the trigger pipeline owns
+# _triggers/, and these are config/agent dirs a user wouldn't annotate.
+_CALLOUT_SKIP_DIRS = {"_triggers", ".obsidian", ".trash"}
+
 
 def find_research_callouts(folders: list[Path]) -> list[tuple[Path, str]]:
-    """Scan note folders for active '> [!research] question' callouts."""
+    """
+    Scan note folders **recursively** for active '> [!research] question' callouts.
+
+    Callouts are meant to be written into whatever note you're working in, anywhere
+    in the vault — the findings are appended in place (see process_research_callout),
+    like a review comment. The watchdog therefore passes the vault root so any note
+    can host a callout, not just the agent-managed folders.
+    """
     results = []
+    seen = set()
     for folder in folders:
         if not folder.exists():
             continue
-        for path in folder.glob("*.md"):
+        for path in folder.rglob("*.md"):
+            if path in seen or any(part in _CALLOUT_SKIP_DIRS for part in path.parts):
+                continue
+            seen.add(path)
             try:
                 _, body = read_note(path)
             except Exception:
@@ -323,6 +373,10 @@ def process_research_callout(path: Path, topic: str):
     callout_line = f"> [!research] {topic}"
     in_progress = f"> [!info] Researching: {topic}…"
 
+    # Capture the rest of the note (with the callout line removed) as document
+    # context, so research is grounded in whatever the user is writing about.
+    context = _CALLOUT_RE.sub("", body, count=1).strip()
+
     # Mark in-progress immediately so the next rescan won't double-process.
     if callout_line.lower() not in body.lower():
         # Fall back to a regex replace of the first matching callout line
@@ -332,7 +386,11 @@ def process_research_callout(path: Path, topic: str):
     write_note(path, fm, body)
 
     print(f"[research] Callout: '{topic}' in {path.name}")
-    report, _ = _run_research(topic, "standard", [])
+    report, _ = _run_research(
+        topic, "standard", [],
+        context=context,
+        synthesis_system_name="research_callout",
+    )
 
     inline_block = (
         f"> [!done] Researched: {topic}\n\n"
