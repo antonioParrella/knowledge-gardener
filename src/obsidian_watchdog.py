@@ -16,6 +16,7 @@ Routes:
 import sys
 import time
 import logging
+import threading
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -30,9 +31,16 @@ from config import (
 )
 from clipper import process_clipped_note, find_unprocessed_clips
 from researcher import (
-    process_research_trigger, find_research_callouts, process_research_callout,
+    process_research_trigger, find_pending_triggers,
+    find_research_callouts, process_research_callout,
 )
 from pdf_processor import process_pdf, find_unprocessed_pdfs
+
+# Serializes all pipeline work between the observer's event thread and the main
+# thread's periodic rescan. Without it, a research run writing source clips to
+# Clippings/ races the rescan, which can process-and-rename the same clip first
+# and crash the research run mid-flight (FileNotFoundError on rename).
+PIPELINE_LOCK = threading.Lock()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -93,6 +101,17 @@ def startup_checks():
                 log.error(f"Error processing backlog {path.name}: {e}")
             time.sleep(3)
 
+    pending_triggers = find_pending_triggers(TRIGGERS_PATH)
+    if pending_triggers:
+        log.info(f"Found {len(pending_triggers)} pending research trigger(s) from previous sessions")
+        for path in pending_triggers:
+            try:
+                log.info(f"Processing backlog trigger: {path.name}")
+                process_research_trigger(path)
+            except Exception as e:
+                log.error(f"Error processing backlog trigger {path.name}: {e}")
+            time.sleep(3)
+
 
 # ── File event handler ────────────────────────────────────────────────────────
 
@@ -136,17 +155,18 @@ class VaultHandler(FileSystemEventHandler):
         try:
             parents = set(path.parents)
 
-            if path.suffix.lower() == ".pdf" and path.parent == PDF_INBOX_PATH:
-                log.info(f"New PDF detected: {path.name}")
-                process_pdf(path)
+            with PIPELINE_LOCK:
+                if path.suffix.lower() == ".pdf" and path.parent == PDF_INBOX_PATH:
+                    log.info(f"New PDF detected: {path.name}")
+                    process_pdf(path)
 
-            elif INBOX_PATH in parents:
-                log.info(f"New clip detected: {path.name}")
-                process_clipped_note(path)
+                elif INBOX_PATH in parents:
+                    log.info(f"New clip detected: {path.name}")
+                    process_clipped_note(path)
 
-            elif TRIGGERS_PATH in parents:
-                log.info(f"New research trigger: {path.name}")
-                process_research_trigger(path)
+                elif TRIGGERS_PATH in parents:
+                    log.info(f"New research trigger: {path.name}")
+                    process_research_trigger(path)
 
         except Exception as e:
             log.error(f"Pipeline error for {path.name}: {e}", exc_info=True)
@@ -185,23 +205,36 @@ def main():
                 for path in find_unprocessed_clips(INBOX_PATH):
                     try:
                         log.info(f"Processing: {path.name}")
-                        process_clipped_note(path)
+                        with PIPELINE_LOCK:
+                            process_clipped_note(path)
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
                     time.sleep(3)
                 for path in find_unprocessed_pdfs(PDF_INBOX_PATH):
                     try:
                         log.info(f"Processing: {path.name}")
-                        process_pdf(path)
+                        with PIPELINE_LOCK:
+                            process_pdf(path)
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
+                    time.sleep(3)
+                # Triggers whose create event was missed or whose run crashed
+                # (iCloud events are unreliable — same reason clips are rescanned).
+                for path in find_pending_triggers(TRIGGERS_PATH):
+                    try:
+                        log.info(f"Processing trigger: {path.name}")
+                        with PIPELINE_LOCK:
+                            process_research_trigger(path)
+                    except Exception as e:
+                        log.error(f"Trigger error {path.name}: {e}")
                     time.sleep(3)
                 # Callouts can live in ANY note in the vault — they're answered
                 # in place, like a review comment (see find_research_callouts).
                 for cpath, ctopic in find_research_callouts([VAULT_PATH]):
                     try:
                         log.info(f"Processing callout: '{ctopic}' in {cpath.name}")
-                        process_research_callout(cpath, ctopic)
+                        with PIPELINE_LOCK:
+                            process_research_callout(cpath, ctopic)
                     except Exception as e:
                         log.error(f"Callout error in {cpath.name}: {e}")
                     time.sleep(3)

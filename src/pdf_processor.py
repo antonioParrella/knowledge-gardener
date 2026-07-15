@@ -110,6 +110,7 @@ def process_pdf(path: Path):
         note_path=note_path,
         summary=moc_summary,
         tags=tags,
+        analysis=analysis,
     )
 
     print(f"[pdf] Done: {clean_title} → {archive_dest.parent.name}/")

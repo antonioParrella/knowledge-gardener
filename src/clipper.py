@@ -156,6 +156,7 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
         note_path=path,
         summary=moc_summary,
         tags=tags,
+        analysis=analysis,
     )
 
     fm["processed"] = True

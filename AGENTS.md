@@ -132,7 +132,12 @@ obsidian_system/
       depth: comprehensive   # standard | deep | comprehensive
       urls:                  # optional seed URLs
         - https://...
-2. iCloud syncs to Surface; obsidian_watchdog.py detects it
+2. iCloud syncs to Surface; obsidian_watchdog.py picks it up via the create
+   event, the 60s periodic rescan, or the startup backlog drain — a trigger
+   stays `research: true` until a run completes, so missed events and
+   crashed runs are retried automatically. All pipeline work is serialized
+   through one lock (`PIPELINE_LOCK`) so the rescan thread can never race a
+   research run that's writing source clips into Clippings/.
 3. researcher.process_research_trigger() runs four phases:
 
    ① find_relevant_clippings(topic) — Gemini reads the MOC catalog
@@ -180,8 +185,14 @@ picks it up and `process_research_callout()`:
 If the process dies mid-research the note is left with the `> [!info]` marker
 (not retried) — a known limitation.
 
-Trigger notes (`_triggers/`) deliberately do **not** pass document context — they
-use the generic `research_synthesis` prompt and write a standalone `Research/` note.
+Trigger notes (`_triggers/`) write a standalone `Research/` note with the generic
+`research_synthesis` prompt (not the callout-tailored one). Their **body** — the
+`## Details` and `## Acceptance Criteria` sections from the Research Trigger
+template — is passed through as a research *brief* (`context_kind="brief"`): the
+details steer discovery, and synthesis is told the report must satisfy the
+acceptance criteria. HTML comments (the template's usage notes) are stripped and
+an empty body leaves behaviour unchanged. This differs from callouts, which pass
+the host note as `context_kind="callout"` and answer *as it applies to that note*.
 
 ### Reset Clips
 
@@ -296,20 +307,52 @@ updated: '2026-06-20'
 
 ## Trigger Note Format
 
-Create this in `_triggers/` from your iPhone:
+Create this in `_triggers/` from your iPhone (the `Templates/Research Trigger.md`
+template in the vault scaffolds it for you):
 
-```yaml
+```markdown
 ---
 research: true
 topic: "quantum computing breakthroughs 2025"
-depth: comprehensive
 urls:
   - https://specific-article.com/to-include
 output: "Research - Quantum Computing.md"
 ---
+
+## Depth
+- [ ] standard — ~4-6 searches, single-draft report
+- [ ] deep — ~8-12 searches, single-draft report
+- [x] comprehensive — ~12-20 searches, draft → critique → revise
+
+## Details
+Focus on error-correction and logical-qubit milestones from 2024-2025; skip
+pop-science coverage. We care about what's actually shipping in hardware.
+
+## Acceptance Criteria
+- [ ] Names the specific labs/companies and their qubit counts
+- [ ] Distinguishes physical vs logical qubits throughout
+- [ ] Ends with a short "what to watch next" section
 ```
 
-`depth` controls how thorough discovery is (source count is up to the agent):
+The frontmatter drives the run; the `## Details` and `## Acceptance Criteria`
+body sections are passed to the agent as a brief (see *Inline Research Callouts*
+above). Both body sections are optional — omit them for a topic-only run.
+
+**Depth** is chosen by ticking one box in a `## Depth` checklist — a plugin-free
+"pick one" that works by tapping on mobile. `_depth_from_body()` reads the first
+ticked box (scoped to the `## Depth` section, so Acceptance-Criteria boxes are
+never misread), and that section is stripped from the brief. Precedence: a ticked
+box wins, then a frontmatter `depth:` key (still supported), then `standard`.
+
+**Ready gate.** The template ends with a `## Ready` section holding a single
+`- [ ] Start research` checkbox. While that box is unticked the pipeline skips
+the trigger — and because the note stays `research: true`, every 60s rescan
+re-checks it, so ticking the box (from any device) starts the run within about
+a minute. This lets a brief be drafted over multiple sessions without the
+watchdog grabbing it mid-edit. A trigger with **no** `## Ready` section at all
+is treated as ready, so minimal hand-written triggers still fire immediately.
+The section is stripped from the brief like `## Depth`.
+Discovery thoroughness (source count is up to the agent):
 - `standard` — ~4-6 searches, single-draft synthesis
 - `deep` — ~8-12 searches, single-draft synthesis
 - `comprehensive` — ~12-20 searches, draft → critique → revise synthesis

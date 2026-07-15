@@ -30,10 +30,19 @@ from indexer import index_note, get_prior_context, find_relevant_clippings
 # ── Phase 2 helpers — discovery prompt ──────────────────────────────────────────
 
 def _build_discovery_prompt(topic: str, depth: str, seed_urls: list[str],
-                            existing: list[dict], context: str = "") -> str:
+                            existing: list[dict], context: str = "",
+                            context_kind: str = "callout") -> str:
     parts = [f"Research this topic:\n\n**{topic}**", f"Depth: {depth}"]
 
-    if context:
+    if context and context_kind == "brief":
+        parts.append(
+            "## Research brief — details & acceptance criteria\n"
+            "The trigger note that requested this research included the brief below: "
+            "extra detail on what the user actually wants, and the acceptance criteria "
+            "the finished report must satisfy. Let it steer which sources you look for.\n\n"
+            + context[:CLIP_CONTENT_LIMIT]
+        )
+    elif context:
         parts.append(
             "## The note this question appears in (for context)\n"
             "The question above was written as an inline callout inside this note. "
@@ -157,13 +166,15 @@ def _build_source_block(sources: list[dict]) -> tuple[str, set[str]]:
 
 
 def _synthesise(topic: str, sources: list[dict], depth: str,
-                context: str = "", system_name: str = "research_synthesis") -> str:
+                context: str = "", system_name: str = "research_synthesis",
+                context_kind: str = "callout") -> str:
     """
     Write the report. Comprehensive depth runs draft → critique → revise.
 
-    When `context` is supplied (inline callouts), the host note is included in the
-    prompt and `system_name` selects the callout-aware synthesis prompt so the
-    model answers the question as it applies to that note.
+    When `context` is supplied it is included in the prompt. `context_kind`
+    selects the framing: "callout" (the host note an inline [!research] lives in,
+    paired with the callout-aware `system_name`) or "brief" (a trigger note's
+    details + acceptance criteria the standalone report must satisfy).
     """
     if not sources:
         return (
@@ -174,7 +185,15 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
     source_block, valid_titles = _build_source_block(sources)
     index_titles = "\n".join(f"{i}. [[{s['title']}]]" for i, s in enumerate(sources, 1))
 
-    if context:
+    if context and context_kind == "brief":
+        base = (
+            f"# Research topic\n{topic}\n\n"
+            f"# Research brief — details & acceptance criteria the report MUST satisfy\n"
+            f"{context[:CLIP_CONTENT_LIMIT]}\n\n"
+            f"# Source index (cite using these EXACT wikilink titles)\n{index_titles}\n\n"
+            f"# Sources with analysis\n{source_block}"
+        )
+    elif context:
         base = (
             f"# Question\n{topic}\n\n"
             f"# The note this question appears in (full context — tailor your answer to it)\n"
@@ -225,15 +244,16 @@ def _validate_wikilinks(report: str, valid_titles: set[str]):
 # ── Core pipeline ────────────────────────────────────────────────────────────────
 
 def _run_research(topic: str, depth: str, seed_urls: list[str],
-                  context: str = "",
+                  context: str = "", context_kind: str = "callout",
                   synthesis_system_name: str = "research_synthesis") -> tuple[str, list[dict]]:
     """
     Run phases ①–④ for a topic. Returns (report_markdown, all_sources).
     Shared by both trigger notes and inline callouts.
 
-    `context` (the host note's full text) and `synthesis_system_name` are set by
-    inline callouts so discovery and synthesis are grounded in the document the
-    callout lives in.
+    `context` grounds discovery and synthesis in extra text. `context_kind`
+    labels it: "callout" (the host note an inline [!research] lives in, with a
+    callout-aware `synthesis_system_name`) or "brief" (a trigger note's details +
+    acceptance criteria). `synthesis_system_name` selects the synthesis prompt.
     """
     reset_queue()
 
@@ -243,7 +263,8 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
         print(f"[research] Found {len(existing)} relevant existing clipping(s).")
 
     # ② Discovery tool loop
-    prompt = _build_discovery_prompt(topic, depth, seed_urls, existing, context=context)
+    prompt = _build_discovery_prompt(topic, depth, seed_urls, existing,
+                                     context=context, context_kind=context_kind)
     llm_tool_loop(
         prompt=prompt,
         system=load_prompt("research_system"),
@@ -263,11 +284,67 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     # ④ Synthesis
     all_sources = existing + newly
     report = _synthesise(topic, all_sources, depth,
-                         context=context, system_name=synthesis_system_name)
+                         context=context, system_name=synthesis_system_name,
+                         context_kind=context_kind)
     _, valid_titles = _build_source_block(all_sources)
     _validate_wikilinks(report, valid_titles)
 
     return report, all_sources
+
+
+# A trigger can gate itself behind a '## Ready' checkbox so a half-written brief
+# is never picked up mid-edit: while the section exists with an unticked box the
+# trigger is skipped, and every rescan re-checks it (the note stays research: true)
+# until the box is ticked. No '## Ready' section at all = ready, so hand-written
+# triggers without the template still fire immediately.
+_READY_SECTION_RE = re.compile(
+    r"^#{1,6}\s+Ready\b.*?(?=^#{1,6}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE
+)
+_TICKED_BOX_RE = re.compile(r"^\s*[-*]\s*\[[xX]\]", re.MULTILINE)
+
+
+def _is_ready(body: str) -> bool:
+    """True unless a '## Ready' section exists with no ticked checkbox."""
+    section = _READY_SECTION_RE.search(body)
+    if not section:
+        return True
+    return bool(_TICKED_BOX_RE.search(section.group(0)))
+
+
+def find_pending_triggers(triggers_path: Path) -> list[Path]:
+    """Find trigger notes not yet processed (research: true, not marked done)."""
+    pending = []
+    if not triggers_path.exists():
+        return pending
+    for md_file in triggers_path.glob("*.md"):
+        try:
+            fm, body = read_note(md_file)
+            if fm.get("research") is True and _is_ready(body):
+                pending.append(md_file)
+        except Exception:
+            continue
+    return pending
+
+
+# Depth in a trigger can be picked with a body checklist (plugin-free "multiple
+# choice" that works by tapping on mobile) instead of a frontmatter key. We only
+# look inside a `## Depth` section, and only accept the three known values, so an
+# Acceptance-Criteria checkbox can never be mistaken for a depth choice.
+_DEPTH_CHOICES = ("standard", "deep", "comprehensive")
+_DEPTH_SECTION_RE = re.compile(
+    r"^#{1,6}\s+Depth\b.*?(?=^#{1,6}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE
+)
+_DEPTH_CHECKBOX_RE = re.compile(
+    r"^\s*[-*]\s*\[[xX]\]\s*(standard|deep|comprehensive)\b", re.MULTILINE | re.IGNORECASE
+)
+
+
+def _depth_from_body(body: str) -> str | None:
+    """Return the depth ticked in a '## Depth' checklist, or None if none is."""
+    section = _DEPTH_SECTION_RE.search(body)
+    scope = section.group(0) if section else body
+    box = _DEPTH_CHECKBOX_RE.search(scope)
+    return box.group(1).lower() if box else None
 
 
 def process_research_trigger(path: Path):
@@ -276,7 +353,7 @@ def process_research_trigger(path: Path):
     Skips silently if not a valid unprocessed research trigger.
     """
     try:
-        fm, _ = read_note(path)
+        fm, body = read_note(path)
     except Exception as e:
         print(f"[research] Could not read {path.name}: {e}")
         return
@@ -284,14 +361,38 @@ def process_research_trigger(path: Path):
     if fm.get("research") is not True:
         return
 
-    topic = fm.get("topic", path.stem.replace("research - ", "").strip())
-    depth = fm.get("depth", "standard")
-    seed_urls = fm.get("urls", []) or []
-    output_name = fm.get("output", f"Research - {topic}.md")
+    # Unticked '## Ready' box → still being written. The rescan re-checks it
+    # every cycle, so ticking the box (even remotely) starts the run.
+    if not _is_ready(body):
+        print(f"[research] Not ready (unticked '## Ready' box), waiting: {path.name}")
+        return
+
+    # `or`-fallbacks (not .get defaults) so a present-but-empty YAML key — common
+    # when a trigger is hand-edited from the template on a phone — falls back
+    # instead of yielding None and crashing downstream.
+    topic = fm.get("topic") or path.stem.replace("research - ", "").strip()
+    seed_urls = fm.get("urls") or []
+    output_name = fm.get("output") or f"Research - {topic}.md"
+
+    # Depth precedence: a ticked '## Depth' checklist box (the template's
+    # plugin-free "multiple choice") wins, then a frontmatter `depth:`, then
+    # standard. The checklist is the template default; the YAML key still works.
+    depth = _depth_from_body(body) or fm.get("depth") or "standard"
+
+    # The note body (e.g. Details + Acceptance Criteria from the trigger template)
+    # is passed through as a research brief so discovery and synthesis are steered
+    # by what the user actually wants. HTML comments (the template's usage notes)
+    # and the '## Depth' / '## Ready' control sections are stripped so only real
+    # content reaches the agent. Empty bodies (after stripping) leave behaviour
+    # unchanged.
+    brief = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    brief = _DEPTH_SECTION_RE.sub("", brief)
+    brief = _READY_SECTION_RE.sub("", brief).strip()
 
     print(f"[research] Starting: '{topic}' (depth: {depth})")
 
-    report, _ = _run_research(topic, depth, seed_urls)
+    report, _ = _run_research(topic, depth, seed_urls,
+                              context=brief, context_kind="brief")
 
     # Write the research note
     output_path = RESEARCH_PATH / output_name
@@ -314,6 +415,7 @@ def process_research_trigger(path: Path):
         note_path=output_path,
         summary=report[:300],
         tags=[w.lower() for w in topic.split()[:4]],
+        analysis=report,
     )
 
     # Mark trigger as done so watchdog doesn't reprocess

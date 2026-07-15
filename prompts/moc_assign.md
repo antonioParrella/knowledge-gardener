@@ -2,9 +2,13 @@ Note title: {note_title}
 Summary: {summary}
 Tags: {tags}
 
+Detailed analysis of the note:
+{analysis}
+
 Existing MOCs:
 {existing}
 
+Base your decision on the detailed analysis above, not just the one-line summary — read it to identify the note's specific sub-field before choosing.
 Which MOC should this note go in?
 Output ONLY the topic name — nothing else. No bullet points, no explanation, no reasoning.
 One or two words, title case. Use an existing MOC name if it fits, or suggest a new short name.

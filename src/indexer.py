@@ -49,10 +49,14 @@ def get_existing_mocs() -> str:
     return "\n".join(lines)
 
 
-def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
+def assign_to_moc(note_title: str, summary: str, tags: list[str], analysis: str = "") -> str:
     """
     Ask Gemini which MOC this note belongs to.
     Returns the MOC topic name (e.g. 'AI', 'Programming').
+
+    `summary` is the one-line index summary; `analysis` is the full detailed
+    write-up (when available). The full analysis gives the model far more to
+    work with than a single sentence, so the assignment is more accurate.
     """
     existing = get_existing_mocs()
     response = llm_simple(
@@ -61,6 +65,7 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str]) -> str:
             "moc_assign",
             note_title=note_title,
             summary=summary[:400],
+            analysis=(analysis or "").strip()[:3000] or "(no detailed analysis available)",
             tags=", ".join(tags),
             existing=existing,
         ),
@@ -134,14 +139,14 @@ def _update_master_index(moc_topic: str):
         master_path.write_text(text, encoding="utf-8")
 
 
-def index_note(note_title: str, note_path: Path, summary: str, tags: list[str]):
+def index_note(note_title: str, note_path: Path, summary: str, tags: list[str], analysis: str = ""):
     """
     Full indexing pipeline for a single note:
-    1. Ask Gemini which MOC it belongs to
-    2. Update that MOC
+    1. Ask Gemini which MOC it belongs to (using the full analysis when available)
+    2. Update that MOC (the one-line `summary` is what gets written to the MOC entry)
     3. Update _index.md
     """
-    moc_topic = assign_to_moc(note_title, summary, tags)
+    moc_topic = assign_to_moc(note_title, summary, tags, analysis=analysis)
     update_moc(moc_topic, note_title, note_path, summary)
 
 
