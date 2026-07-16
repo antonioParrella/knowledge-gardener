@@ -37,6 +37,40 @@ def safe_filename(title: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", title).strip()
 
 
+# Any run of non-alphanumeric characters collapses to a single hyphen, so
+# "Machine Learning", "machine_learning" and "machine/learning" all canonicalise
+# the same way.
+_TAG_SEP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_tag(tag: str) -> str:
+    """
+    Canonicalise a single tag to lowercase-hyphenated form.
+
+    Deterministic hygiene only — casing, a leading '#', and separator style
+    (spaces / underscores / slashes -> hyphen). It deliberately does NOT merge
+    synonyms ("ml" vs "machine-learning") or split concatenations
+    ("machinelearning"); that judgement lives in the tag vocabulary
+    (Index/_tags.md) and the one-time consolidate_tags.py pass.
+
+        "  Tax Evasion " -> "tax-evasion"   "#ML" -> "ml"   "wealth_tax" -> "wealth-tax"
+    """
+    tag = _TAG_SEP_RE.sub("-", str(tag).strip().lower().lstrip("#"))
+    return tag.strip("-")
+
+
+def normalize_tags(tags) -> list[str]:
+    """Normalise a list of tags: canonicalise each, drop empties, dedup (order-preserving)."""
+    if isinstance(tags, str):
+        tags = [tags]
+    out: list[str] = []
+    for t in tags or []:
+        n = normalize_tag(t)
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
 def today() -> str:
     return time.strftime("%Y-%m-%d")
 

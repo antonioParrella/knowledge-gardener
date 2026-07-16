@@ -11,12 +11,73 @@ Responsible for:
 import re
 import time
 from pathlib import Path
-from notes import read_note, write_note, today
+from notes import read_note, write_note, today, normalize_tag, normalize_tags
 from llm import llm_simple, parse_json_response
-from config import INDEX_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
+from config import (
+    INDEX_PATH, INBOX_PATH, SOURCES_PATH, RESEARCH_PATH,
+    RESEARCH_CONTEXT_EXCERPT, load_prompt,
+)
 
 # Matches a MOC note entry: "- [[Title]] — summary" (em-dash or hyphen separator).
 _MOC_ENTRY_RE = re.compile(r"-\s*\[\[([^\]|#]+)\]\]\s*(?:[—-]\s*(.*))?$")
+
+
+# ── Tag vocabulary ──────────────────────────────────────────────────────────────
+# A single canonical tag list, fed into the tagging prompts so the model reuses an
+# existing tag when one means the same thing instead of coining a near-duplicate
+# ("ml" vs "machine-learning"). New tags the pipeline coins are appended here.
+# Seeded by consolidate_tags.py; hand-editable (one "- tag" per line).
+TAGS_VOCAB_PATH = INDEX_PATH / "_tags.md"
+
+_VOCAB_ENTRY_RE = re.compile(r"^\s*-\s*(?:#\s*)?(\S.*?)\s*$")
+
+_VOCAB_HEADER = (
+    "# Tag Vocabulary\n\n"
+    "Canonical tags used across the vault. The tagging prompts read this list and "
+    "reuse an existing tag whenever it means the same thing; new tags the agent "
+    "coins are appended below. Edit freely — one `- tag` per line, lowercase-hyphenated.\n\n"
+    "## Tags\n"
+)
+
+
+def load_tag_vocabulary() -> list[str]:
+    """Return the canonical tag list from Index/_tags.md (empty if it doesn't exist)."""
+    if not TAGS_VOCAB_PATH.exists():
+        return []
+    tags: list[str] = []
+    for line in TAGS_VOCAB_PATH.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):  # skip headings
+            continue
+        m = _VOCAB_ENTRY_RE.match(line)
+        if not m:
+            continue
+        t = normalize_tag(m.group(1))
+        if t and t not in tags:
+            tags.append(t)
+    return tags
+
+
+def format_tag_vocabulary(limit: int = 400) -> str:
+    """Render the vocabulary for prompt injection (file order; capped for token safety)."""
+    vocab = load_tag_vocabulary()
+    if not vocab:
+        return "(no existing tags yet — coin clear, specific, lowercase-hyphenated ones)"
+    return ", ".join(vocab[:limit])
+
+
+def register_tags(tags: list[str]) -> None:
+    """
+    Append any not-yet-known tags to the vocabulary file (Index/_tags.md), creating
+    it if missing. Tags are assumed already normalised. All pipeline work is
+    serialised through PIPELINE_LOCK upstream, so no extra locking is needed here.
+    """
+    known = set(load_tag_vocabulary())
+    new = [t for t in normalize_tags(tags) if t not in known]
+    if not new:
+        return
+    TAGS_VOCAB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    base = TAGS_VOCAB_PATH.read_text(encoding="utf-8").rstrip() if TAGS_VOCAB_PATH.exists() else _VOCAB_HEADER.rstrip()
+    TAGS_VOCAB_PATH.write_text(base + "\n" + "\n".join(f"- {t}" for t in new) + "\n", encoding="utf-8")
 
 
 # Acronyms that should stay uppercase in MOC names (title() would lowercase them).
@@ -145,9 +206,15 @@ def index_note(note_title: str, note_path: Path, summary: str, tags: list[str], 
     1. Ask Gemini which MOC it belongs to (using the full analysis when available)
     2. Update that MOC (the one-line `summary` is what gets written to the MOC entry)
     3. Update _index.md
+    4. Register the note's tags in the canonical vocabulary
+
+    Callers pass already-normalised tags (frontmatter and the vocabulary must
+    agree); this is the single choke point every tagged note flows through, so
+    vocabulary registration lives here rather than in each pipeline.
     """
     moc_topic = assign_to_moc(note_title, summary, tags, analysis=analysis)
     update_moc(moc_topic, note_title, note_path, summary)
+    register_tags(tags)
 
 
 def get_prior_context(topic: str) -> str:
@@ -211,8 +278,13 @@ def find_relevant_clippings(topic: str) -> list[dict]:
     MOC catalog (title + one-line summary) as the candidate list — no keyword
     prefilter. Returns [{title, analysis}] with the full analysis loaded for each
     selected note (the body before the "## Original Content" section).
+
+    Prior research reports (notes in Research/) are excluded from the candidate
+    list — they're handled as related work by find_relevant_research(), not as
+    primary sources — so the model never spends a pick on one here.
     """
-    catalog = _read_moc_catalog()
+    research_titles = {p.stem for p in RESEARCH_PATH.glob("*.md")}
+    catalog = [(t, s) for t, s in _read_moc_catalog() if t not in research_titles]
     if not catalog:
         return []
 
@@ -250,4 +322,83 @@ def find_relevant_clippings(topic: str) -> list[dict]:
             continue
         analysis = body.split("## Original Content")[0].strip()
         results.append({"title": title, "analysis": analysis})
+    return results
+
+
+def _research_catalog() -> list[tuple[str, str]]:
+    """
+    (title, one-line summary) for every prior research report in Research/.
+    The summary is the curated MOC entry when the report has been indexed,
+    otherwise the report's frontmatter `topic`.
+    """
+    moc_summaries = dict(_read_moc_catalog())
+    catalog: list[tuple[str, str]] = []
+    for note in sorted(RESEARCH_PATH.glob("*.md")):
+        title = note.stem
+        summary = moc_summaries.get(title, "")
+        if not summary:
+            try:
+                fm, _ = read_note(note)
+                summary = (fm.get("topic") or "").strip()
+            except Exception:
+                summary = ""
+        catalog.append((title, summary))
+    return catalog
+
+
+def find_relevant_research(topic: str, exclude_title: str | None = None) -> list[dict]:
+    """
+    Ask the model which *prior research reports* (notes in Research/) are related
+    to a new research topic, judging over their titles + one-line summaries.
+
+    Prior research is related work the agent has already written — NOT a primary
+    source. Returns [{title, summary, context}] where `context` is an excerpt of
+    the prior report, used to ground discovery/synthesis so the new report builds
+    on and cross-links to prior work instead of duplicating it. `exclude_title`
+    drops the report currently being (re)written so it never references itself.
+    """
+    catalog = [(t, s) for t, s in _research_catalog() if t != exclude_title]
+    if not catalog:
+        return []
+
+    catalog_text = "\n".join(f"- {t} — {s}" if s else f"- {t}" for t, s in catalog)
+    response = llm_simple(
+        task="moc",
+        prompt=(
+            f"New research topic: {topic}\n\n"
+            f"Prior research reports already in the knowledge base:\n{catalog_text}\n\n"
+            "Return a JSON array of the EXACT report titles that are genuinely related "
+            "to the new topic — reports whose findings give useful context, or that the "
+            "new report should build on or cross-reference to avoid duplicating work. Use "
+            "the titles verbatim. Return [] if none are related. No prose, JSON array only."
+        ),
+        system=(
+            "You select related prior research reports from a personal knowledge base "
+            "so a new report can build on them instead of repeating work already done. "
+            "Be precise: only include reports that materially relate to the new topic."
+        ),
+    )
+
+    titles = parse_json_response(response)
+    if not isinstance(titles, list):
+        return []
+
+    summaries = dict(catalog)
+    valid = set(summaries)
+    results = []
+    for title in titles:
+        if not isinstance(title, str) or title not in valid:
+            continue
+        note_path = RESEARCH_PATH / f"{title}.md"
+        if not note_path.exists():
+            continue
+        try:
+            _, body = read_note(note_path)
+        except Exception:
+            continue
+        results.append({
+            "title": title,
+            "summary": summaries.get(title, ""),
+            "context": body.strip()[:RESEARCH_CONTEXT_EXCERPT],
+        })
     return results

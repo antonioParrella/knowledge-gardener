@@ -99,6 +99,7 @@ FETCH_CONTENT_LIMIT    = 8000  # max chars from a fetched URL
 CLIP_CONTENT_LIMIT     = 12000 # max chars from a clipped note
 PAPER_CONTENT_LIMIT    = 40000 # max chars sent to clip-analysis for full-text papers
 SYNTHESIS_RAW_EXCERPT  = 15000 # max raw chars per source passed to report synthesis
+RESEARCH_CONTEXT_EXCERPT = 6000 # max chars of a prior research report passed as related-work context
 ICLOUD_SETTLE_SECS     = 3     # seconds to wait after file created before processing
 
 # ── Prompt files ───────────────────────────────────────────────────────────────

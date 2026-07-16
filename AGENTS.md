@@ -58,6 +58,7 @@ MyVault/
 │
 ├── Index/                          ← Agent-maintained knowledge base
 │   ├── _index.md                   ← Master list of all MOCs
+│   ├── _tags.md                    ← Canonical tag vocabulary (fed to tagging prompts)
 │   ├── MOC - LLM Training.md       ← specific sub-fields, not broad domains
 │   ├── MOC - Generative Models.md
 │   └── MOC - Sports Nutrition.md
@@ -78,7 +79,9 @@ obsidian_system/
 │   ├── research_system.md     ← System prompt for the discovery tool loop
 │   ├── research_synthesis.md  ← System prompt for report synthesis (draft/revise)
 │   ├── research_critique.md   ← System prompt for the comprehensive critique pass
-│   └── research_callout.md    ← System prompt for inline [!research] callout answers
+│   ├── research_callout.md    ← System prompt for inline [!research] callout answers
+│   ├── research_tags.md       ← Extracts useful topical tags for a finished report
+│   └── tag_consolidation.md   ← One-shot: map drifted tags → canonical (consolidate_tags.py)
 └── src/
     ├── config.py            ← All settings (edit VAULT_PATH here)
     ├── notes.py             ← Read/write markdown note helpers
@@ -88,7 +91,7 @@ obsidian_system/
     │   ├── gemini.py        ← Gemini provider (google-genai); fallback + retry; tool loop
     │   └── openrouter.py    ← OpenRouter provider (openai SDK); reasoning + tool loop
     ├── gemini_client.py     ← Backward-compat shim → llm.py
-    ├── indexer.py           ← MOC creation/maintenance; find_relevant_clippings
+    ├── indexer.py           ← MOC creation/maintenance; find_relevant_clippings + find_relevant_research
     ├── academic.py          ← arXiv + OpenAlex search; PDF download + full-text extract
     ├── web_tools.py         ← search_arxiv/openalex/web, fetch_url, queue_source tools
     ├── clipper.py           ← Web Clipper note processing pipeline
@@ -96,6 +99,7 @@ obsidian_system/
     ├── pdf_processor.py     ← PDF text extraction + summarisation
     ├── obsidian_watchdog.py ← Main entry point, file system monitor
     ├── reset_clips.py       ← Standalone script to revert clips to original
+    ├── consolidate_tags.py  ← One-time backfill: unify drifted tags → canonical vocabulary
     └── lint.py              ← Vault health checker (run periodically)
 ```
 
@@ -140,8 +144,16 @@ obsidian_system/
    research run that's writing source clips into Clippings/.
 3. researcher.process_research_trigger() runs four phases:
 
-   ① find_relevant_clippings(topic) — Gemini reads the MOC catalog
-      (title + one-line summary per note) and picks the relevant ones.
+   ① Two prior-knowledge lanes, kept separate:
+      - find_relevant_clippings(topic) — Gemini reads the MOC catalog
+        (title + one-line summary per note, minus Research/ reports) and picks
+        the relevant clippings. These become cited primary **sources**.
+      - find_relevant_research(topic) — Gemini reads the titles + one-line
+        summaries of prior reports in Research/ and picks the related ones.
+        These are treated as **related work**, not sources: their text grounds
+        discovery and synthesis, and the new report cross-links to them (under a
+        "## Related research" heading) instead of re-deriving or re-citing them.
+        The report being (re)written is excluded so it never references itself.
    ② Discovery tool loop (gemini_tool_loop) — the agent calls
       search_arxiv / search_openalex / search_web / fetch_url, then
       queue_source(url, title, kind, reason, abstract) for each keeper.
@@ -154,9 +166,13 @@ obsidian_system/
       The text is written to Clippings/ (source_type: research_found) and
       run through clipper.process_clipped_note() → indexed into a MOC.
    ④ _synthesise() — builds a source index of exact [[wikilink]] titles
-      and writes the report. standard/deep = single draft; comprehensive =
-      draft → critique (research_critique) → revise. Broken wikilinks are
-      logged via _validate_wikilinks().
+      and writes the report. Any related prior research reports from ① are
+      passed as a distinct block (not merged into the sources), so the report
+      builds on and cross-links to them under "## Related research" without
+      citing them as primary evidence or listing them under "## Sources".
+      standard/deep = single draft; comprehensive = draft → critique
+      (research_critique) → revise. Broken wikilinks are logged via
+      _validate_wikilinks() (its valid set includes prior-research titles).
 
 4. Report saved to Research/Research - Topic.md, indexed into a MOC,
    trigger marked research: done.
@@ -302,6 +318,49 @@ updated: '2026-06-20'
 - [[Geometric Stability Analysis of Autonomous Generative Models]] — Riemannian gradient flow on marginal energy with implicit metrics for stability
 - [[Metropolis-Adjusted Diffusion Models]] — Replaces biased ULA correctors with Metropolis-adjusted, score-based steps
 ```
+
+---
+
+## Tags & the Canonical Vocabulary
+
+Every clip, PDF, and research note carries frontmatter `tags`. Left unmanaged, an
+LLM tags freely and the vault fragments into near-duplicates that don't connect
+when you filter — real examples from this vault: `machinelearning` / `machine-learning`,
+`llm` / `llms` / `languagemodels`, `sports-betting` / `sportsbetting` / `sportsbook`,
+`wealth-tax` / `wealthtax`. Two mechanisms keep tags consistent:
+
+**1. Deterministic normalisation (`notes.normalize_tag` / `normalize_tags`).**
+Every tag written by any pipeline is canonicalised to **lowercase-hyphenated**:
+casing, a leading `#`, and separators (spaces / underscores / slashes → hyphen)
+are fixed, so `Tax Evasion` and `tax_evasion` both become `tax-evasion`. This is
+pure string hygiene — it does *not* merge synonyms or split concatenations.
+
+**2. A canonical vocabulary (`Index/_tags.md`).** A single hand-editable list of
+the tags in use, fed into the tagging prompts (`clip_analysis`, `research_tags`)
+via `indexer.format_tag_vocabulary()`. The prompts instruct the model to **reuse
+an existing tag whenever it means the same thing** (use `machine-learning`, don't
+coin `ml`) and only coin a new tag when nothing fits — while still keeping tags
+specific, so the vocabulary doesn't collapse into a few mega-tags. This is the
+opposite of the MOC-assignment rule (which deliberately avoids "be consistent
+with existing names" to prevent one giant MOC): for tags, cross-cutting reuse is
+exactly what we want. New tags are appended to `_tags.md` by `indexer.register_tags()`,
+which every note flows through inside `index_note()`.
+
+**Backfill (`consolidate_tags.py`).** The vocabulary only prevents *future* drift;
+existing notes are unified with a one-time pass. It's two-step so the merge can be
+reviewed before it touches the vault:
+
+```
+python src/consolidate_tags.py            # DRY RUN: LLM proposes raw→canonical, writes tag_map.json
+#   ... review / hand-edit tag_map.json (drops shown as "" ) ...
+python src/consolidate_tags.py --apply    # applies the reviewed map, rewrites frontmatter, seeds _tags.md
+```
+
+Apply reads the reviewed `tag_map.json` (it does **not** re-call the model, so what
+you approve is what's written), rewrites every note's `tags`, drops junk (stopword
+fragments, bare years, broken markers), skips notes already canonical, and seeds
+`Index/_tags.md` most-used-first. Any tag missing from the map keeps its normalised
+self, so nothing is silently lost.
 
 ---
 

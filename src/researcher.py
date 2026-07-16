@@ -19,19 +19,23 @@ from config import (
     CLIP_CONTENT_LIMIT, PAPER_CONTENT_LIMIT, SYNTHESIS_RAW_EXCERPT,
     load_prompt,
 )
-from notes import read_note, write_note, safe_filename, today
-from llm import llm_simple, llm_tool_loop
+from notes import read_note, write_note, safe_filename, today, normalize_tags
+from llm import llm_simple, llm_tool_loop, parse_json_response
 from web_tools import TOOL_SCHEMA, execute_tool, reset_queue, get_queue
 from academic import extract_paper_text
 from clipper import process_clipped_note, find_existing_source
-from indexer import index_note, get_prior_context, find_relevant_clippings
+from indexer import (
+    index_note, get_prior_context, find_relevant_clippings, find_relevant_research,
+    format_tag_vocabulary,
+)
 
 
 # ── Phase 2 helpers — discovery prompt ──────────────────────────────────────────
 
 def _build_discovery_prompt(topic: str, depth: str, seed_urls: list[str],
                             existing: list[dict], context: str = "",
-                            context_kind: str = "callout") -> str:
+                            context_kind: str = "callout",
+                            prior_research: list[dict] | None = None) -> str:
     parts = [f"Research this topic:\n\n**{topic}**", f"Depth: {depth}"]
 
     if context and context_kind == "brief":
@@ -55,6 +59,20 @@ def _build_discovery_prompt(topic: str, depth: str, seed_urls: list[str],
         known = "\n".join(f"- [[{c['title']}]]" for c in existing)
         parts.append(
             "## Already in the knowledge base (do not re-discover these):\n" + known
+        )
+
+    if prior_research:
+        prior = "\n".join(
+            f"- [[{p['title']}]] — {p['summary']}" if p.get("summary") else f"- [[{p['title']}]]"
+            for p in prior_research
+        )
+        parts.append(
+            "## Prior research reports on related topics (related work, NOT sources to re-fetch):\n"
+            "You have already written the reports below. Their findings are given to the "
+            "synthesis phase in full. Treat them as prior knowledge: build on what they "
+            "already establish and steer your searches toward what is new or missing "
+            "relative to them, rather than re-researching ground they already cover.\n\n"
+            + prior
         )
 
     if seed_urls:
@@ -165,9 +183,21 @@ def _build_source_block(sources: list[dict]) -> tuple[str, set[str]]:
     return "\n\n".join(lines), valid_titles
 
 
+def _build_prior_research_block(prior_research: list[dict]) -> str:
+    """Build the related-work text for the synthesis prompt from prior research reports."""
+    lines = []
+    for i, p in enumerate(prior_research, 1):
+        header = f"### {i}. [[{p['title']}]]"
+        if p.get("summary"):
+            header += f" — {p['summary']}"
+        lines.append(f"{header}\n{p.get('context', '')}")
+    return "\n\n".join(lines)
+
+
 def _synthesise(topic: str, sources: list[dict], depth: str,
                 context: str = "", system_name: str = "research_synthesis",
-                context_kind: str = "callout") -> str:
+                context_kind: str = "callout",
+                prior_research: list[dict] | None = None) -> str:
     """
     Write the report. Comprehensive depth runs draft → critique → revise.
 
@@ -175,8 +205,13 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
     selects the framing: "callout" (the host note an inline [!research] lives in,
     paired with the callout-aware `system_name`) or "brief" (a trigger note's
     details + acceptance criteria the standalone report must satisfy).
+
+    `prior_research` is related work the agent has already written: it is passed
+    as a distinct block (not merged into the sources) so the report can build on
+    and cross-link to it without treating it as primary evidence.
     """
-    if not sources:
+    prior_research = prior_research or []
+    if not sources and not prior_research:
         return (
             f"# {topic}\n\nNo sources were found or available to synthesise a report "
             f"for this topic. Try rephrasing the topic or adding seed URLs."
@@ -206,6 +241,19 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
             f"# Research topic\n{topic}\n\n"
             f"# Source index (cite using these EXACT wikilink titles)\n{index_titles}\n\n"
             f"# Sources with analysis\n{source_block}"
+        )
+
+    prior_block = _build_prior_research_block(prior_research)
+    if prior_block:
+        base += (
+            "\n\n# Prior research reports — related work you have already written (NOT primary sources)\n"
+            "These are earlier reports in this knowledge base on related topics. Use them for "
+            "context and to avoid re-deriving what they already cover. Where this report connects "
+            "to, extends, or would otherwise duplicate one, reference it by its exact [[wikilink]] "
+            "title (inline, or under a \"## Related research\" heading) and point the reader there "
+            "rather than repeating it. Do NOT treat them as primary evidence and do NOT list them "
+            "under ## Sources.\n\n"
+            + prior_block
         )
 
     synthesis_system = load_prompt(system_name)
@@ -245,7 +293,8 @@ def _validate_wikilinks(report: str, valid_titles: set[str]):
 
 def _run_research(topic: str, depth: str, seed_urls: list[str],
                   context: str = "", context_kind: str = "callout",
-                  synthesis_system_name: str = "research_synthesis") -> tuple[str, list[dict]]:
+                  synthesis_system_name: str = "research_synthesis",
+                  exclude_research_title: str | None = None) -> tuple[str, list[dict]]:
     """
     Run phases ①–④ for a topic. Returns (report_markdown, all_sources).
     Shared by both trigger notes and inline callouts.
@@ -254,17 +303,25 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     labels it: "callout" (the host note an inline [!research] lives in, with a
     callout-aware `synthesis_system_name`) or "brief" (a trigger note's details +
     acceptance criteria). `synthesis_system_name` selects the synthesis prompt.
+    `exclude_research_title` drops that report from the prior-research lane so a
+    re-run doesn't feed a report its own previous version.
     """
     reset_queue()
 
-    # ① Relevant existing clippings (Gemini-judged)
+    # ① Relevant existing clippings (primary sources) and prior research reports
+    #    (related work). These are kept in separate lanes: clippings become cited
+    #    sources; prior research is context the report builds on and cross-links to.
     existing = find_relevant_clippings(topic)
     if existing:
         print(f"[research] Found {len(existing)} relevant existing clipping(s).")
+    prior_research = find_relevant_research(topic, exclude_title=exclude_research_title)
+    if prior_research:
+        print(f"[research] Found {len(prior_research)} related prior research report(s).")
 
     # ② Discovery tool loop
     prompt = _build_discovery_prompt(topic, depth, seed_urls, existing,
-                                     context=context, context_kind=context_kind)
+                                     context=context, context_kind=context_kind,
+                                     prior_research=prior_research)
     llm_tool_loop(
         prompt=prompt,
         system=load_prompt("research_system"),
@@ -285,8 +342,9 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     all_sources = existing + newly
     report = _synthesise(topic, all_sources, depth,
                          context=context, system_name=synthesis_system_name,
-                         context_kind=context_kind)
+                         context_kind=context_kind, prior_research=prior_research)
     _, valid_titles = _build_source_block(all_sources)
+    valid_titles |= {p["title"] for p in prior_research}
     _validate_wikilinks(report, valid_titles)
 
     return report, all_sources
@@ -347,6 +405,33 @@ def _depth_from_body(body: str) -> str | None:
     return box.group(1).lower() if box else None
 
 
+def _extract_tags(topic: str, report: str) -> list[str]:
+    """
+    Ask the cheap ('moc') model for 3-6 useful topical tags for a research report.
+
+    Historically tags were just the topic's first four words lowercased, which
+    yielded junk like ["quantum", "computing", "breakthroughs", "2025"]. This reads
+    the report and returns real subject/method tags, reusing the existing tag
+    vocabulary (Index/_tags.md) where it fits so the vault doesn't accumulate
+    near-duplicates. All results pass through normalize_tags (lowercase-hyphenated).
+    Falls back to the normalised word-split on any failure so a completed research
+    run is never lost over tags.
+    """
+    fallback = normalize_tags(topic.split()[:4])
+    try:
+        prompt = load_prompt("research_tags", topic=topic,
+                             report=report[:SYNTHESIS_RAW_EXCERPT],
+                             vocabulary=format_tag_vocabulary())
+        data = parse_json_response(llm_simple(prompt=prompt, task="moc"))
+        raw = data.get("tags") if isinstance(data, dict) else None
+        cleaned = normalize_tags(raw or [])
+        if cleaned:
+            return cleaned[:6]
+    except Exception as e:
+        print(f"[research] Tag extraction failed ({e}); using fallback tags")
+    return fallback
+
+
 def process_research_trigger(path: Path):
     """
     Full research pipeline for a _triggers/ note. Writes a report to Research/.
@@ -392,7 +477,11 @@ def process_research_trigger(path: Path):
     print(f"[research] Starting: '{topic}' (depth: {depth})")
 
     report, _ = _run_research(topic, depth, seed_urls,
-                              context=brief, context_kind="brief")
+                              context=brief, context_kind="brief",
+                              exclude_research_title=output_name.replace(".md", ""))
+
+    # Derive real topical tags from the report (not the topic's first few words).
+    tags = _extract_tags(topic, report)
 
     # Write the research note
     output_path = RESEARCH_PATH / output_name
@@ -403,7 +492,7 @@ def process_research_trigger(path: Path):
             "topic": topic,
             "depth": depth,
             "date": today(),
-            "tags": [w.lower() for w in topic.split()[:4]],
+            "tags": tags,
         },
         body=report,
     )
@@ -414,7 +503,7 @@ def process_research_trigger(path: Path):
         note_title=output_name.replace(".md", ""),
         note_path=output_path,
         summary=report[:300],
-        tags=[w.lower() for w in topic.split()[:4]],
+        tags=tags,
         analysis=report,
     )
 

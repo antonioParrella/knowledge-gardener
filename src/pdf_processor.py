@@ -14,9 +14,9 @@ from datetime import datetime
 from pathlib import Path
 
 from config import PDF_ARCHIVE_PATH, INBOX_PATH, CLIP_CONTENT_LIMIT, load_prompt
-from notes import write_note, safe_filename, today
+from notes import write_note, safe_filename, today, normalize_tags
 from llm import llm_simple, parse_json_response
-from indexer import index_note
+from indexer import index_note, format_tag_vocabulary
 
 
 def extract_pdf_text(pdf_path: Path) -> str:
@@ -70,7 +70,8 @@ def process_pdf(path: Path):
     content = text[:CLIP_CONTENT_LIMIT]
 
     system_prompt = load_prompt("clip_system")
-    user_prompt = load_prompt("clip_analysis", source_url=path.name, content=content)
+    user_prompt = load_prompt("clip_analysis", source_url=path.name, content=content,
+                              vocabulary=format_tag_vocabulary())
 
     result_text = llm_simple(prompt=user_prompt, system=system_prompt, task="clip")
 
@@ -81,7 +82,7 @@ def process_pdf(path: Path):
 
     title = data.get("title", path.stem)
     clean_title = safe_filename(title)
-    tags = data.get("tags", [])
+    tags = normalize_tags(data.get("tags", []))
     analysis = data.get("content") or data.get("summary") or ""
     moc_summary = data.get("moc_summary") or ""
 

@@ -13,9 +13,9 @@ import re
 from pathlib import Path
 
 from config import CLIP_CONTENT_LIMIT, VAULT_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
-from notes import read_note, write_note, safe_filename, today
+from notes import read_note, write_note, safe_filename, today, normalize_tags
 from llm import llm_simple, parse_json_response
-from indexer import index_note
+from indexer import index_note, format_tag_vocabulary
 
 
 def find_existing_source(source_url: str) -> Path | None:
@@ -118,7 +118,8 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     content = body[:content_limit]
 
     system_prompt = load_prompt("clip_system")
-    user_prompt = load_prompt("clip_analysis", source_url=source_url, content=content)
+    user_prompt = load_prompt("clip_analysis", source_url=source_url, content=content,
+                              vocabulary=format_tag_vocabulary())
 
     result_text = llm_simple(
         prompt=user_prompt,
@@ -134,7 +135,7 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     summary_title = data.get("title", path.stem)
     clean_title = safe_filename(summary_title)
 
-    tags = data.get("tags", [])
+    tags = normalize_tags(data.get("tags", []))
     analysis = data.get("content") or data.get("summary") or ""
     moc_summary = data.get("moc_summary") or ""
 
