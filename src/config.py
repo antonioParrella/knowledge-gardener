@@ -50,41 +50,49 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # and discovery relies on the academic APIs only.
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
-# Models to try in order if rate limits are hit
-GEMINI_MODELS = [
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview"
-]
-
 GEMINI_THINKING_LEVEL = "high"  # "minimal" | "low" | "medium" | "high"
+
+# When a model raises QuotaExhausted (daily free-tier cap hit), the router marks
+# it as cooling down for this long and skips it on subsequent calls instead of
+# re-attempting a doomed request every time. Kept short so a reset quota (Gemini
+# free tier resets daily, ~midnight Pacific) is re-probed promptly — at most one
+# wasted probe per model per window.
+QUOTA_COOLDOWN_SECS = 1800  # 30 minutes
 
 # ── LLM routing ─────────────────────────────────────────────────────────────────
 # Per-task provider chains. Each task maps to an ordered list of
 # (provider, model, opts); the router (llm.py) tries each in turn, falling
 # through on quota exhaustion / errors. Keep the cheap/free option first.
 #
-#   clip / moc → free Gemini Flash first, then DeepSeek V4 Flash via OpenRouter
-#                (better than Flash-Lite, no quota cliff) for ~cents.
+#   clip / moc → two free Gemini models first (each has its own daily free-tier
+#                bucket, so stacking them ~doubles free headroom), then DeepSeek
+#                V4 Flash via OpenRouter (better than Flash-Lite, no quota cliff)
+#                for ~cents. The quota circuit breaker in llm.py makes the
+#                gemini→gemini→openrouter hop instant once a bucket is spent.
 #   research   → DeepSeek V4 Pro at max reasoning via OpenRouter (frontier-class,
-#                ~1/15th Opus cost), falling back to free Gemini Flash (tool-capable).
+#                ~1/15th Opus cost), falling back to the free Gemini models.
 # Reasoning opt is OpenRouter's normalized effort (minimal/low/medium/high/xhigh;
 # "xhigh" = max — OpenRouter rejects the literal "max").
-GEMINI_FLASH = "gemini-3-flash-preview"
-OR_FLASH     = "deepseek/deepseek-v4-flash"
-OR_PRO       = "deepseek/deepseek-v4-pro"
+GEMINI_FLASH_35 = "gemini-3.5-flash"
+GEMINI_FLASH    = "gemini-3-flash-preview"
+OR_FLASH        = "deepseek/deepseek-v4-flash"
+OR_PRO          = "deepseek/deepseek-v4-pro"
 
 ROUTING = {
     "clip": [
-        ("gemini",     GEMINI_FLASH, {}),
-        ("openrouter", OR_FLASH,     {}),
+        ("gemini",     GEMINI_FLASH_35, {}),
+        ("gemini",     GEMINI_FLASH,    {}),
+        ("openrouter", OR_FLASH,        {}),
     ],
     "moc": [
-        ("gemini",     GEMINI_FLASH, {}),
-        ("openrouter", OR_FLASH,     {}),
+        ("gemini",     GEMINI_FLASH_35, {}),
+        ("gemini",     GEMINI_FLASH,    {}),
+        ("openrouter", OR_FLASH,        {}),
     ],
     "research": [
-        ("openrouter", OR_PRO,       {"reasoning_effort": "xhigh"}),
-        ("gemini",     GEMINI_FLASH, {}),
+        ("openrouter", OR_PRO,          {"reasoning_effort": "xhigh"}),
+        ("gemini",     GEMINI_FLASH_35, {}),
+        ("gemini",     GEMINI_FLASH,    {}),
     ],
 }
 

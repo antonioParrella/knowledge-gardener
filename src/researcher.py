@@ -26,7 +26,7 @@ from academic import extract_paper_text
 from clipper import process_clipped_note, find_existing_source
 from indexer import (
     index_note, get_prior_context, find_relevant_clippings, find_relevant_research,
-    format_tag_vocabulary,
+    format_tag_vocabulary, one_line,
 )
 
 
@@ -171,12 +171,18 @@ def _process_source(entry: dict) -> dict | None:
 # ── Phase 4 helpers — synthesis ──────────────────────────────────────────────────
 
 def _build_source_block(sources: list[dict]) -> tuple[str, set[str]]:
-    """Build the source index text for the synthesis prompt and the set of valid titles."""
+    """
+    Build the source index text for the synthesis prompt and the set of valid titles.
+
+    Deliberately unnumbered: an ordinal next to each title gives the model a
+    number to cite instead of the title, and it takes it — a numbered index
+    produced a whole report citing [[21]], [[27]] rather than wikilinks.
+    """
     lines = []
     valid_titles = set()
-    for i, s in enumerate(sources, 1):
+    for s in sources:
         valid_titles.add(s["title"])
-        block = f"### {i}. [[{s['title']}]]\n{s.get('analysis', '')}"
+        block = f"### [[{s['title']}]]\n{s.get('analysis', '')}"
         if s.get("raw"):
             block += f"\n\n_Excerpt from source text:_\n{s['raw']}"
         lines.append(block)
@@ -186,8 +192,8 @@ def _build_source_block(sources: list[dict]) -> tuple[str, set[str]]:
 def _build_prior_research_block(prior_research: list[dict]) -> str:
     """Build the related-work text for the synthesis prompt from prior research reports."""
     lines = []
-    for i, p in enumerate(prior_research, 1):
-        header = f"### {i}. [[{p['title']}]]"
+    for p in prior_research:
+        header = f"### [[{p['title']}]]"
         if p.get("summary"):
             header += f" — {p['summary']}"
         lines.append(f"{header}\n{p.get('context', '')}")
@@ -218,7 +224,7 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
         )
 
     source_block, valid_titles = _build_source_block(sources)
-    index_titles = "\n".join(f"{i}. [[{s['title']}]]" for i, s in enumerate(sources, 1))
+    index_titles = "\n".join(f"- [[{s['title']}]]" for s in sources)
 
     if context and context_kind == "brief":
         base = (
@@ -282,11 +288,114 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
     return revised
 
 
-def _validate_wikilinks(report: str, valid_titles: set[str]):
-    """Log any [[wikilink]] in the report that doesn't match a known source title."""
+def _find_bad_wikilinks(report: str, valid_titles: set[str]) -> list[str]:
+    """Return the [[wikilinks]] in the report that don't match a known title."""
+    seen, bad = set(), []
     for link in re.findall(r"\[\[([^\]|#]+)\]\]", report):
-        if link.strip() not in valid_titles:
-            print(f"[research] Warning: wikilink [[{link}]] not in source index — may be broken")
+        link = link.strip()
+        if link not in valid_titles and link not in seen:
+            seen.add(link)
+            bad.append(link)
+    return bad
+
+
+def _repair_wikilinks(report: str, valid_titles: set[str]) -> str:
+    """
+    Replace citations that don't match a real note with the correct title.
+
+    Synthesis occasionally drifts out of wikilink citation and into the numbered
+    style of the papers it is summarising, emitting [[21]] instead of the title.
+    Every such link is dead in Obsidian, so rather than warn and write it anyway,
+    hand the report back with the valid titles and have the bad links resolved
+    from context. Repair is best-effort: anything still unresolved is logged.
+    """
+    bad = _find_bad_wikilinks(report, valid_titles)
+    if not bad:
+        return report
+
+    print(f"[research] {len(bad)} invalid wikilink(s) in report: {', '.join(bad[:10])}"
+          + (" …" if len(bad) > 10 else ""))
+    print("[research] Running citation repair pass")
+
+    title_list = "\n".join(f"- [[{t}]]" for t in sorted(valid_titles))
+    repaired = llm_simple(
+        task="research",
+        system=load_prompt("research_repair_links"),
+        prompt=(
+            f"# Valid note titles\n{title_list}\n\n"
+            f"# Invalid citations to fix\n" + "\n".join(f"- [[{b}]]" for b in bad) + "\n\n"
+            f"# Report\n{report}"
+        ),
+    )
+
+    # Only accept the repair if it actually improved things — a mangled or
+    # truncated response must not clobber a report whose prose is fine.
+    if not repaired or len(repaired) < len(report) * 0.8:
+        print("[research] Repair pass returned a suspiciously short report — keeping original")
+        return report
+
+    still_bad = _find_bad_wikilinks(repaired, valid_titles)
+    if len(still_bad) >= len(bad):
+        print("[research] Repair pass did not reduce invalid links — keeping original")
+        return report
+
+    if still_bad:
+        print(f"[research] {len(still_bad)} link(s) still unresolved: {', '.join(still_bad[:10])}")
+    else:
+        print("[research] All citations resolved to real notes")
+    return repaired
+
+
+_H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+
+# Obsidian forbids these in filenames; ':' in particular is near-universal in the
+# title/subtitle H1s reports come back with ("Topic: A Critical Examination").
+_TITLE_PUNCT_RE = re.compile(r"\s*[:–—]\s*")
+
+
+def _title_from_report(report: str) -> str | None:
+    """
+    Derive a note title from the report's own H1.
+
+    Synthesis writes a genuinely good title ("World Models and Their Origins: A
+    Critical Examination of…") and it used to be discarded in favour of the
+    trigger's `topic`, which is often a bare keyword — or literally "Untitled"
+    when the trigger omits it. Prefer the H1, trimmed of subtitle and clamped to
+    a sane filename length.
+    """
+    match = _H1_RE.search(report)
+    if not match:
+        return None
+
+    title = match.group(1).strip().strip("*_`")
+    # Keep the part before the first ':' / dash — the subtitle is usually the
+    # long half, and the head alone reads better as a note name.
+    head = _TITLE_PUNCT_RE.split(title)[0].strip()
+    if len(head) >= 15:
+        title = head
+
+    title = safe_filename(title).strip()
+    if len(title) > 90:
+        title = title[:90].rsplit(" ", 1)[0].strip()
+    return title or None
+
+
+def _research_note_name(fm: dict, topic: str, report: str) -> str:
+    """
+    Pick the filename for a research note.
+
+    Precedence: an explicit `output:` in the trigger (the user asked for it by
+    name) → the report's own H1 → the trigger's topic.
+    """
+    explicit = fm.get("output")
+    if explicit:
+        return explicit if explicit.endswith(".md") else f"{explicit}.md"
+
+    derived = _title_from_report(report)
+    if derived:
+        return f"Research - {derived}.md"
+
+    return f"Research - {safe_filename(topic)}.md"
 
 
 # ── Core pipeline ────────────────────────────────────────────────────────────────
@@ -345,7 +454,7 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
                          context_kind=context_kind, prior_research=prior_research)
     _, valid_titles = _build_source_block(all_sources)
     valid_titles |= {p["title"] for p in prior_research}
-    _validate_wikilinks(report, valid_titles)
+    report = _repair_wikilinks(report, valid_titles)
 
     return report, all_sources
 
@@ -405,31 +514,50 @@ def _depth_from_body(body: str) -> str | None:
     return box.group(1).lower() if box else None
 
 
-def _extract_tags(topic: str, report: str) -> list[str]:
+def _index_entry(topic: str, report: str) -> tuple[list[str], str]:
     """
-    Ask the cheap ('moc') model for 3-6 useful topical tags for a research report.
+    Ask the cheap ('moc') model for a research report's tags and index summary.
+
+    Both come from one call because both need the model to have read the report.
 
     Historically tags were just the topic's first four words lowercased, which
     yielded junk like ["quantum", "computing", "breakthroughs", "2025"]. This reads
     the report and returns real subject/method tags, reusing the existing tag
     vocabulary (Index/_tags.md) where it fits so the vault doesn't accumulate
     near-duplicates. All results pass through normalize_tags (lowercase-hyphenated).
-    Falls back to the normalised word-split on any failure so a completed research
-    run is never lost over tags.
+
+    The summary is the one-liner written into the note's MOC entry. It used to be
+    `report[:300]` — a raw prefix that dragged the report's H1 and opening
+    paragraphs into what must be a single list item, wrecking the MOC's formatting.
+
+    Falls back to the normalised word-split and a trimmed first line on any
+    failure, so a completed research run is never lost over its index entry.
     """
-    fallback = normalize_tags(topic.split()[:4])
+    fallback_tags = normalize_tags(topic.split()[:4])
+    fallback_summary = _fallback_summary(report)
     try:
         prompt = load_prompt("research_tags", topic=topic,
                              report=report[:SYNTHESIS_RAW_EXCERPT],
                              vocabulary=format_tag_vocabulary())
         data = parse_json_response(llm_simple(prompt=prompt, task="moc"))
-        raw = data.get("tags") if isinstance(data, dict) else None
-        cleaned = normalize_tags(raw or [])
-        if cleaned:
-            return cleaned[:6]
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        tags = normalize_tags(data.get("tags") or [])[:6] or fallback_tags
+        summary = one_line(data.get("summary") or "") or fallback_summary
+        return tags, summary
     except Exception as e:
-        print(f"[research] Tag extraction failed ({e}); using fallback tags")
-    return fallback
+        print(f"[research] Index entry extraction failed ({e}); using fallbacks")
+    return fallback_tags, fallback_summary
+
+
+def _fallback_summary(report: str) -> str:
+    """First real sentence of the report, for when the model can't be reached."""
+    for line in report.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ">", "-", "|", "$")):
+            continue
+        return one_line(line)
+    return ""
 
 
 def process_research_trigger(path: Path):
@@ -455,9 +583,7 @@ def process_research_trigger(path: Path):
     # `or`-fallbacks (not .get defaults) so a present-but-empty YAML key — common
     # when a trigger is hand-edited from the template on a phone — falls back
     # instead of yielding None and crashing downstream.
-    topic = fm.get("topic") or path.stem.replace("research - ", "").strip()
     seed_urls = fm.get("urls") or []
-    output_name = fm.get("output") or f"Research - {topic}.md"
 
     # Depth precedence: a ticked '## Depth' checklist box (the template's
     # plugin-free "multiple choice") wins, then a frontmatter `depth:`, then
@@ -474,14 +600,34 @@ def process_research_trigger(path: Path):
     brief = _DEPTH_SECTION_RE.sub("", brief)
     brief = _READY_SECTION_RE.sub("", brief).strip()
 
+    # `or`-fallbacks (not .get defaults) so a present-but-empty YAML key — common
+    # when a trigger is hand-edited from the template on a phone — falls back
+    # instead of yielding None and crashing downstream. A trigger whose `topic:`
+    # is empty and whose filename is the Obsidian default ("Untitled") carries no
+    # topic at all: fall back to the brief, which is where the real question is,
+    # rather than researching the literal string "Untitled".
+    topic = fm.get("topic") or path.stem.replace("research - ", "").strip()
+    if topic.lower().startswith("untitled") and brief:
+        topic = " ".join(brief.split())[:300]
+        print(f"[research] Trigger has no topic; using the brief: '{topic[:80]}…'")
+
     print(f"[research] Starting: '{topic}' (depth: {depth})")
+
+    # Provisional name, used only to keep a re-run from feeding a report its own
+    # previous version. The real name is derived from the finished report below.
+    provisional = fm.get("output") or f"Research - {safe_filename(topic)}.md"
 
     report, _ = _run_research(topic, depth, seed_urls,
                               context=brief, context_kind="brief",
-                              exclude_research_title=output_name.replace(".md", ""))
+                              exclude_research_title=provisional.replace(".md", ""))
 
-    # Derive real topical tags from the report (not the topic's first few words).
-    tags = _extract_tags(topic, report)
+    # Derive real topical tags and a one-line index summary from the report
+    # (not the topic's first few words / the report's first 300 characters).
+    tags, summary = _index_entry(topic, report)
+
+    # Name the note from the report's own H1 unless the trigger asked for a
+    # specific `output:` — a bare/absent topic still yields a proper title.
+    output_name = _research_note_name(fm, topic, report)
 
     # Write the research note
     output_path = RESEARCH_PATH / output_name
@@ -502,7 +648,7 @@ def process_research_trigger(path: Path):
     index_note(
         note_title=output_name.replace(".md", ""),
         note_path=output_path,
-        summary=report[:300],
+        summary=summary,
         tags=tags,
         analysis=report,
     )

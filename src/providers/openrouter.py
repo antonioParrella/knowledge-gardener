@@ -66,6 +66,19 @@ def _to_openai_tools(tool_schema: list[dict]) -> list[dict]:
     ]
 
 
+def _check_complete(choice, model):
+    """
+    Raise if the model was cut off mid-generation.
+
+    finish_reason == "length" means the response hit the output cap, which for a
+    synthesis pass yields a report that ends mid-sentence. Silently accepting it
+    writes a truncated report into the vault, so treat it as a provider error and
+    let the router fall through to the next chain entry.
+    """
+    if getattr(choice, "finish_reason", None) == "length":
+        raise ProviderError(f"{model}: response truncated (hit output token limit)")
+
+
 def _get_field(msg, key):
     """Read a field that may be a typed attr or an extra (unknown) field on the SDK model."""
     val = getattr(msg, key, None)
@@ -88,6 +101,7 @@ class OpenRouterProvider(Provider):
                 messages=_build_messages(prompt, system),
                 **kwargs,
             )
+            _check_complete(resp.choices[0], model)
             return resp.choices[0].message.content or ""
         except ProviderError:
             raise
@@ -122,6 +136,7 @@ class OpenRouterProvider(Provider):
                 msg = resp.choices[0].message
 
                 if not msg.tool_calls:
+                    _check_complete(resp.choices[0], model)
                     return (msg.content or "").strip()
 
                 # Echo the assistant turn back, preserving reasoning across tool

@@ -80,7 +80,8 @@ obsidian_system/
 │   ├── research_synthesis.md  ← System prompt for report synthesis (draft/revise)
 │   ├── research_critique.md   ← System prompt for the comprehensive critique pass
 │   ├── research_callout.md    ← System prompt for inline [!research] callout answers
-│   ├── research_tags.md       ← Extracts useful topical tags for a finished report
+│   ├── research_repair_links.md ← Resolves citations that aren't real note titles
+│   ├── research_tags.md       ← One-line MOC summary + topical tags for a finished report
 │   └── tag_consolidation.md   ← One-shot: map drifted tags → canonical (consolidate_tags.py)
 └── src/
     ├── config.py            ← All settings (edit VAULT_PATH here)
@@ -166,17 +167,49 @@ obsidian_system/
       The text is written to Clippings/ (source_type: research_found) and
       run through clipper.process_clipped_note() → indexed into a MOC.
    ④ _synthesise() — builds a source index of exact [[wikilink]] titles
-      and writes the report. Any related prior research reports from ① are
-      passed as a distinct block (not merged into the sources), so the report
-      builds on and cross-links to them under "## Related research" without
-      citing them as primary evidence or listing them under "## Sources".
-      standard/deep = single draft; comprehensive = draft → critique
-      (research_critique) → revise. Broken wikilinks are logged via
-      _validate_wikilinks() (its valid set includes prior-research titles).
+      and writes the report. The index is deliberately **unnumbered**: an
+      ordinal beside each title gives the model a number to cite instead of
+      the title, and it takes it (see *Citation integrity* below). Any related
+      prior research reports from ① are passed as a distinct block (not merged
+      into the sources), so the report builds on and cross-links to them under
+      "## Related research" without citing them as primary evidence or listing
+      them under "## Sources". standard/deep = single draft; comprehensive =
+      draft → critique (research_critique) → revise. Citations are then checked
+      and repaired by _repair_wikilinks() (its valid set includes
+      prior-research titles).
 
-4. Report saved to Research/Research - Topic.md, indexed into a MOC,
-   trigger marked research: done.
+4. Report saved to Research/, indexed into a MOC, trigger marked research: done.
+   The filename comes from _research_note_name(): an explicit `output:` in the
+   trigger wins, else the report's own H1 (trimmed of subtitle), else the topic.
 ```
+
+### Citation integrity
+
+Reports cite sources as `[[wikilinks]]` that must match a note title **exactly**;
+anything else is a dead link in Obsidian. Synthesis can drift out of that
+convention and into the numbered-reference style of the papers it is
+summarising — one report came back citing `[[21]]`, `[[27]]` throughout, every
+link dead. Notably it was *not* the report with the most sources (a 39-source
+report cited cleanly); the trigger appears to be the genre of the corpus, which
+makes it a matter of luck rather than load. Three mechanisms defend against it:
+
+1. **No ordinals in the prompt.** `_build_source_block` / `_build_prior_research_block`
+   list sources as `- [[Title]]`, never `1. [[Title]]`. If the model is never shown
+   a number, it has none to substitute for the title.
+2. **An explicit ban.** `research_synthesis` and `research_callout` both state that
+   citing by number is always wrong, however strongly the sources' own style
+   suggests it.
+3. **A repair pass, not a warning.** `_repair_wikilinks()` collects every link that
+   doesn't match a real title and, if any exist, hands the report back to the model
+   with the valid titles (`research_repair_links`) to resolve them from context;
+   unresolvable ones are dropped rather than left dead. The repair is only accepted
+   if it actually reduces the invalid-link count and doesn't shrink the report — a
+   mangled repair must never clobber good prose. This replaced `_validate_wikilinks()`,
+   which only printed a warning and wrote the broken report to the vault anyway.
+
+Relatedly, the OpenRouter provider raises on `finish_reason == "length"`, so a
+report truncated mid-sentence by the output cap fails over to the next chain
+entry instead of being written to the vault as if complete.
 
 ### Inline Research Callouts
 
@@ -319,6 +352,15 @@ updated: '2026-06-20'
 - [[Metropolis-Adjusted Diffusion Models]] — Replaces biased ULA correctors with Metropolis-adjusted, score-based steps
 ```
 
+**Entry summaries are one line, always.** An entry is a single markdown list item,
+so a multi-line summary splits the list and breaks the MOC. Clips and PDFs pass the
+clipper's one-liner; research notes get theirs from `research_tags` (which returns
+the MOC summary *and* the tags in one call, since both need the model to have read
+the report). Research notes used to pass `report[:300]` — a raw prefix that dragged
+the report's H1 and opening paragraphs into the list item. `indexer.one_line()`
+now flattens and clamps whatever a caller passes, at the point the entry is
+written, so no future caller can reintroduce this.
+
 ---
 
 ## Tags & the Canonical Vocabulary
@@ -392,6 +434,20 @@ pop-science coverage. We care about what's actually shipping in hardware.
 - [ ] Distinguishes physical vs logical qubits throughout
 - [ ] Ends with a short "what to watch next" section
 ```
+
+**Naming.** `output:` is optional and only needed to pin an exact filename.
+Without it the note is named from the finished report's own H1 — synthesis writes
+a far better title than a trigger keyword ("Research - World Models and Their
+Origins" rather than "Research - World Models"), and that title used to be
+discarded. A subtitle after `:` / `–` is trimmed. Only if the report has no H1
+does the `topic` become the name.
+
+**A missing topic falls back to the brief.** `topic:` and the filename are both
+`or`-fallbacks, so a trigger created from the phone's + button and left with
+`topic: null` used to be named from its filename stem — yielding a real run
+titled `Research - Untitled` that also searched prior knowledge for the literal
+string "Untitled". An empty topic on an `Untitled*` note now falls back to the
+brief, where the actual question is.
 
 The frontmatter drives the run; the `## Details` and `## Acceptance Criteria`
 body sections are passed to the agent as a brief (see *Inline Research Callouts*

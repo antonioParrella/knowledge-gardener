@@ -21,6 +21,24 @@ from config import (
 # Matches a MOC note entry: "- [[Title]] — summary" (em-dash or hyphen separator).
 _MOC_ENTRY_RE = re.compile(r"-\s*\[\[([^\]|#]+)\]\]\s*(?:[—-]\s*(.*))?$")
 
+# A MOC entry is one markdown list item, so its summary must be one line. Callers
+# have passed raw report prefixes here before, which dragged headings and whole
+# paragraphs into the list and broke the MOC's structure — flatten defensively
+# rather than trusting every caller to.
+_MOC_SUMMARY_LIMIT = 200
+
+
+def one_line(text: str, limit: int = _MOC_SUMMARY_LIMIT) -> str:
+    """Collapse text to a single plain line suitable for a MOC list entry."""
+    if not text:
+        return ""
+    # Drop markdown headings/quotes/bullets outright — a summary should be prose.
+    text = re.sub(r"^\s*(#{1,6}|>|[-*+])\s*", "", text.strip(), flags=re.MULTILINE)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(",;:—-") + "…"
+    return text
+
 
 # ── Tag vocabulary ──────────────────────────────────────────────────────────────
 # A single canonical tag list, fed into the tagging prompts so the model reuses an
@@ -167,7 +185,7 @@ def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):
     # Add entry if not already present
     link = f"[[{note_path.stem}]]"
     if link not in body:
-        entry = f"- {link} — {summary}\n"
+        entry = f"- {link} — {one_line(summary)}\n"
 
         if "## Notes\n" in body:
             body = body.replace("## Notes\n", f"## Notes\n{entry}")
