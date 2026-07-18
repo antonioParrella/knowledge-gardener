@@ -22,6 +22,13 @@ Both pipelines maintain a set of **MOC notes** (Maps of Content) — topic-based
 index notes the agent builds and updates automatically. Over time the agent
 builds on prior knowledge rather than starting from scratch each time.
 
+**Concept notes (automatic)** — Whenever a research report is compiled, the agent
+also extracts the foundational ideas the report leans on and writes standalone,
+university-textbook-level explainers for them (`Concept - <Term>`), linked inline
+from the report. This is the *learning* layer: research reports resolve questions
+and engage the expert debate; concept notes teach the underlying ideas — once —
+and are reused by everything that references them (see *Concept Pipeline* below).
+
 Total cost: **$0** (Tavily and Gemini both have free tiers; arXiv + OpenAlex need no key).
 
 ---
@@ -53,6 +60,9 @@ MyVault/
 ├── Research/                       ← Agent-generated research notes
 │   └── Research - Topic Name.md
 │
+├── Concepts/                       ← Agent-written concept explainers (learning layer)
+│   └── Concept - Reward Prediction Error.md
+│
 ├── Sources/                        ← Sources the agent saved during research
 │   └── Source Title.md
 │
@@ -82,6 +92,9 @@ obsidian_system/
 │   ├── research_callout.md    ← System prompt for inline [!research] callout answers
 │   ├── research_repair_links.md ← Resolves citations that aren't real note titles
 │   ├── research_tags.md       ← One-line MOC summary + topical tags for a finished report
+│   ├── concept_extract.md     ← Picks foundational concepts from a finished report (+ verbatim mention to link)
+│   ├── concept_system.md      ← System prompt for the concept discovery loop (restraint-first)
+│   ├── concept_synthesis.md   ← System prompt for writing the textbook-level concept note
 │   └── tag_consolidation.md   ← One-shot: map drifted tags → canonical (consolidate_tags.py)
 └── src/
     ├── config.py            ← All settings (edit VAULT_PATH here)
@@ -96,7 +109,7 @@ obsidian_system/
     ├── academic.py          ← arXiv + OpenAlex search; PDF download + full-text extract
     ├── web_tools.py         ← search_arxiv/openalex/web, fetch_url, queue_source tools
     ├── clipper.py           ← Web Clipper note processing pipeline
-    ├── researcher.py        ← Research pipeline (discovery → process → synthesis) + callouts
+    ├── researcher.py        ← Research pipeline (discovery → process → synthesis) + callouts + concept extraction/generation
     ├── pdf_processor.py     ← PDF text extraction + summarisation
     ├── obsidian_watchdog.py ← Main entry point, file system monitor
     ├── reset_clips.py       ← Standalone script to revert clips to original
@@ -265,6 +278,76 @@ details steer discovery, and synthesis is told the report must satisfy the
 acceptance criteria. HTML comments (the template's usage notes) are stripped and
 an empty body leaves behaviour unchanged. This differs from callouts, which pass
 the host note as `context_kind="callout"` and answer *as it applies to that note*.
+
+### Concept Pipeline
+
+Research reports are *outcome-focused* — they resolve a question and engage the
+expert debate. **Concept notes** are the learning-focused complement: standalone,
+university-textbook-level explainers of the foundational ideas a report leans on
+(`Concept - Dopamine`, `Concept - Elasticity of Taxable Income`). They are written
+once, reused everywhere, and accumulate across the vault — so the knowledge base
+teaches the basics, not just the frontier. Concept notes are **derived
+automatically** from finished research reports; you don't author them.
+
+```
+1. At the end of process_research_trigger() — after the report is written and
+   indexed — _conceptualize() runs. It is best-effort: any failure is caught and
+   never blocks completing the research run (concepts are additive).
+2. _conceptualize() — one cheap `moc`-tier call with the concept_extract prompt:
+   - Reads the finished report and picks the foundational, *reusable* concepts it
+     leans on but doesn't build from scratch — capped at MAX_CONCEPTS_PER_REPORT
+     (8), fewer is better. It rejects the report's own thesis, one-off jargon, and
+     paper-specific proper nouns, and is shown the existing concept names so it
+     reuses them. Returns {term, mention, why, context_excerpt} per pick.
+   - Links each concept INTO the report body deterministically
+     (_link_concepts_inline): the first clean occurrence of `mention` is wrapped as
+     `[[Concept - Term|mention]]` — the report keeps its own wording as the alias,
+     the link resolves to the concept note. Pure string surgery, no LLM and no
+     regeneration (so it can never drift prose or truncate), skipping headings,
+     fenced/inline code, existing wikilinks, and the trailing ## Sources /
+     ## Related research apparatus. A trailing `## Concepts` list is appended as a
+     backstop, so a concept whose mention can't be placed inline is never lost. The
+     report gets `concepts_extracted: true`.
+   - For each pick: if a Concepts/ note or a pending `concept: true` trigger already
+     covers it, no new work is queued — an existing note just gets this report added
+     as a backlink (`## Appears in`). Otherwise a `concept: true` trigger is written
+     to _triggers/.
+3. The watchdog dispatches concept triggers (startup backlog, on-create, 60s rescan;
+   routed by their `concept` flag) to process_concept_trigger() → _run_concept():
+   - A restrained discovery loop (task `research`, concept_system prompt): queue
+     sources ONLY if genuinely needed. For a well-settled concept that is **zero**,
+     a normal outcome — unlike research, there is no "no sources" stub; the explainer
+     is written from established knowledge. Relevant existing clippings are reused
+     as seeds (find_relevant_clippings).
+   - Any queued sources are processed by the same _process_source() into indexed
+     clippings, reusable by future work.
+   - Synthesis on the top model (task `synthesis`, OpenRouter-only, concept_synthesis
+     prompt) writes the textbook explainer; citations are repaired against the
+     concept's own sources (_repair_wikilinks) only when it actually cited any.
+4. Written to Concepts/Concept - <term>.md (frontmatter `concept_note: true`; H1 = the
+   bare term; `## Appears in` backlinks; `## Sources` only if it pulled any), indexed
+   into a topic MOC under a `## Concepts` subsection, and the trigger is marked
+   `concept: done`.
+```
+
+**One concept, one note, linked everywhere.** The dedup that makes concepts
+cumulative rather than duplicative has three guards: the conceptualizer skips terms
+already built (Concepts/ glob) or already queued (pending triggers); a returned term
+is **snapped onto the canonical title** of an existing/pending concept via
+`_match_key` — a casing- *and* punctuation-insensitive key, so `Chamley-Judd Theorem`
+(hyphen) maps onto an existing `Chamley–Judd Theorem` (en-dash) note instead of
+minting a dead link and a duplicate; and process_concept_trigger re-checks at run
+time, adding a backlink instead of regenerating. Mechanical drift (casing, spacing,
+punctuation) is caught deterministically; a genuine *synonym* — different words for
+the same idea — still relies on the model reusing the name it is shown.
+
+**Cost & scope.** Concept generation deliberately uses the best model (`synthesis`,
+OpenRouter-only, no free-tier fallback) because the explainer's quality is what
+matters; the dedup guarantee is what stops this compounding, since each concept is
+paid for exactly once and thereafter only linked. Only standalone Research/ reports
+are conceptualized — inline `[!research]` callouts are not (they annotate arbitrary
+notes in place). If OpenRouter is unavailable the concept synthesis fails and the
+trigger stays pending to retry, exactly like research synthesis.
 
 ### Reset Clips
 
@@ -442,6 +525,13 @@ the report's H1 and opening paragraphs into the list item. `indexer.one_line()`
 now flattens and clamps whatever a caller passes, at the point the entry is
 written, so no future caller can reintroduce this.
 
+**Concept notes get their own subsection.** A MOC lists clippings and research
+reports under `## Notes` and concept explainers under a separate `## Concepts`
+heading (`update_moc(..., section="Concepts")`), created on demand when the first
+concept lands. Both subsections count toward `note_count`, and the linter counts
+both (see *Vault Linting*) — counting only `## Notes` made every MOC with a concept
+note read as a false mismatch.
+
 ---
 
 ## Tags & the Canonical Vocabulary
@@ -559,6 +649,12 @@ Discovery thoroughness (source count is up to the agent):
 - `deep` — ~8-12 searches, single-draft synthesis
 - `comprehensive` — ~12-20 searches, draft → critique → revise synthesis
 
+**Concept triggers.** `_triggers/` also holds `concept: true` notes, but you never
+write these — the conceptualizer pass emits them automatically (see *Concept
+Pipeline*). The watchdog routes on the `concept` flag, so they never collide with
+your `research: true` triggers, and they carry `term` / `source` frontmatter plus
+the concept's context in the body.
+
 ---
 
 ## Web Clipper Setup
@@ -633,6 +729,7 @@ Vault: C:\Users\You\iCloud Drive\Obsidian\MyVault
 Watching for:
   Clips    → Clippings/
   Research → _triggers/
+  Concepts → _triggers/ (concept: true)
 Press Ctrl+C to stop.
 ```
 
@@ -708,6 +805,11 @@ be written and reviewed by OpenRouter, so if it is unavailable the run fails and
 retries rather than producing a lower-tier report. Adding a provider or re-routing a
 task is a one-line edit to `ROUTING`. `thinking_level` is `high` on every Gemini
 call (`config.py`).
+
+Concept notes add no new routes: conceptualization (picking concepts + placing the
+inline links) runs on the cheap `moc` task, the concept discovery loop reuses
+`research`, and the concept explainer reuses `synthesis` (OpenRouter-only, top model
+— the note's quality is worth it, and dedup means each concept is written once).
 
 ---
 
