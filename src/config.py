@@ -26,11 +26,12 @@ VAULT_PATH   = Path(r"C:\Users\parre\iCloudDrive\iCloud~md~obsidian\Knowledge Ga
 
 INBOX_PATH    = VAULT_PATH / "Clippings"       # Web Clipper saves here
 RESEARCH_PATH = VAULT_PATH / "Research"   # Agent research summaries
+CONCEPTS_PATH = VAULT_PATH / "Concepts"   # Agent-written textbook-level explainers
 INDEX_PATH    = VAULT_PATH / "Index"       # MOCs and master index
 SOURCES_PATH  = VAULT_PATH / "Sources"    # Agent-saved research sources
 TRIGGERS_PATH = VAULT_PATH / "_triggers"  # iPhone research trigger notes
 
-ALL_PATHS = [INBOX_PATH, RESEARCH_PATH, INDEX_PATH, SOURCES_PATH, TRIGGERS_PATH]
+ALL_PATHS = [INBOX_PATH, RESEARCH_PATH, CONCEPTS_PATH, INDEX_PATH, SOURCES_PATH, TRIGGERS_PATH]
 
 # ── PDF paths ─────────────────────────────────────────────────────────────────
 # Drop PDFs here from iPhone or Surface — iCloud synced but outside the vault
@@ -118,6 +119,12 @@ ROUTING = {
 ARXIV_API_URL    = "http://export.arxiv.org/api/query"
 OPENALEX_API_URL = "https://api.openalex.org/works"
 TAVILY_API_URL   = "https://api.tavily.com/search"
+
+# ── Concept settings ────────────────────────────────────────────────────────────
+# Upper bound on how many concepts the conceptualizer pass extracts from a single
+# research report — a cap on over-triggering, not a target. Each new concept fires
+# its own paid discovery+synthesis run, so keep this modest.
+MAX_CONCEPTS_PER_REPORT = 8
 
 # ── Research settings ─────────────────────────────────────────────────────────
 MAX_SEARCH_ITERATIONS  = 30    # max tool-call loops per research run (safety bound)

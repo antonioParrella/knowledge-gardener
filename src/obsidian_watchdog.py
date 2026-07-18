@@ -33,8 +33,10 @@ from config import (
 from clipper import process_clipped_note, find_unprocessed_clips
 from researcher import (
     process_research_trigger, find_pending_triggers,
+    process_concept_trigger, find_pending_concept_triggers,
     find_research_callouts, process_research_callout,
 )
+from notes import read_note
 from pdf_processor import process_pdf, find_unprocessed_pdfs
 
 # Serializes all pipeline work between the observer's event thread and the main
@@ -164,6 +166,19 @@ def startup_checks():
                 log.error(f"Error processing backlog trigger {path.name}: {e}")
             time.sleep(3)
 
+    # Concept triggers (written by the conceptualizer pass) drained after research
+    # triggers, since a research run is what queues them.
+    pending_concepts = find_pending_concept_triggers(TRIGGERS_PATH)
+    if pending_concepts:
+        log.info(f"Found {len(pending_concepts)} pending concept trigger(s) from previous sessions")
+        for path in pending_concepts:
+            try:
+                log.info(f"Processing backlog concept: {path.name}")
+                process_concept_trigger(path)
+            except Exception as e:
+                log.error(f"Error processing backlog concept {path.name}: {e}")
+            time.sleep(3)
+
 
 # ── File event handler ────────────────────────────────────────────────────────
 
@@ -217,8 +232,15 @@ class VaultHandler(FileSystemEventHandler):
                     process_clipped_note(path)
 
                 elif TRIGGERS_PATH in parents:
-                    log.info(f"New research trigger: {path.name}")
-                    process_research_trigger(path)
+                    # Concept and research triggers share the _triggers/ folder;
+                    # dispatch on the frontmatter flag.
+                    fm, _ = read_note(path)
+                    if fm.get("concept") is True:
+                        log.info(f"New concept trigger: {path.name}")
+                        process_concept_trigger(path)
+                    else:
+                        log.info(f"New research trigger: {path.name}")
+                        process_research_trigger(path)
 
         except Exception as e:
             log.error(f"Pipeline error for {path.name}: {e}", exc_info=True)
@@ -235,6 +257,7 @@ def main():
     log.info("Watching for:")
     log.info(f"  Clips    → {INBOX_PATH.relative_to(VAULT_PATH)}/")
     log.info(f"  Research → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/")
+    log.info(f"  Concepts → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/ (concept: true)")
     log.info(f"  PDFs     → {PDF_INBOX_PATH}/")
     log.info("Press Ctrl+C to stop.")
     log.info("=" * 60)
@@ -279,6 +302,16 @@ def main():
                             process_research_trigger(path)
                     except Exception as e:
                         log.error(f"Trigger error {path.name}: {e}")
+                    time.sleep(3)
+                # Concept triggers, drained after research triggers (a research run
+                # is what queues them, so any just-created ones are picked up here).
+                for path in find_pending_concept_triggers(TRIGGERS_PATH):
+                    try:
+                        log.info(f"Processing concept trigger: {path.name}")
+                        with PIPELINE_LOCK:
+                            process_concept_trigger(path)
+                    except Exception as e:
+                        log.error(f"Concept trigger error {path.name}: {e}")
                     time.sleep(3)
                 # Callouts can live in ANY note in the vault — they're answered
                 # in place, like a review comment (see find_research_callouts).

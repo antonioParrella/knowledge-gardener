@@ -14,7 +14,7 @@ from pathlib import Path
 from notes import read_note, write_note, today, normalize_tag, normalize_tags
 from llm import llm_simple, parse_json_response
 from config import (
-    INDEX_PATH, INBOX_PATH, SOURCES_PATH, RESEARCH_PATH,
+    INDEX_PATH, INBOX_PATH, SOURCES_PATH, RESEARCH_PATH, CONCEPTS_PATH,
     RESEARCH_CONTEXT_EXCERPT, load_prompt,
 )
 
@@ -158,11 +158,17 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str], analysis: str 
     return _titlecase_topic(topic)
 
 
-def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):
+def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str,
+               section: str = "Notes"):
     """
-    Add a note entry to the appropriate MOC.
+    Add a note entry to the appropriate MOC, under the given `section` heading.
     Creates the MOC if it doesn't exist yet.
     Also updates the master _index.md.
+
+    `section` is the H2 the entry is listed under — "Notes" for clippings and
+    research reports, "Concepts" for concept explainers — so a topic MOC keeps its
+    sources and its concept notes visually separate. A missing section heading is
+    created on demand (appended after the existing body).
     """
     moc_path = INDEX_PATH / f"MOC - {moc_topic}.md"
 
@@ -186,11 +192,14 @@ def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str):
     link = f"[[{note_path.stem}]]"
     if link not in body:
         entry = f"- {link} — {one_line(summary)}\n"
+        heading = f"## {section}\n"
 
-        if "## Notes\n" in body:
-            body = body.replace("## Notes\n", f"## Notes\n{entry}")
+        if heading in body:
+            body = body.replace(heading, f"{heading}{entry}")
         else:
-            body += f"\n{entry}"
+            # Section doesn't exist yet (e.g. the first concept in a MOC that only
+            # had a ## Notes section) — add it at the end of the body.
+            body = body.rstrip() + f"\n\n{heading}{entry}"
 
         fm["note_count"] = int(fm.get("note_count", 0)) + 1
 
@@ -218,7 +227,8 @@ def _update_master_index(moc_topic: str):
         master_path.write_text(text, encoding="utf-8")
 
 
-def index_note(note_title: str, note_path: Path, summary: str, tags: list[str], analysis: str = ""):
+def index_note(note_title: str, note_path: Path, summary: str, tags: list[str],
+               analysis: str = "", section: str = "Notes"):
     """
     Full indexing pipeline for a single note:
     1. Ask Gemini which MOC it belongs to (using the full analysis when available)
@@ -226,12 +236,15 @@ def index_note(note_title: str, note_path: Path, summary: str, tags: list[str], 
     3. Update _index.md
     4. Register the note's tags in the canonical vocabulary
 
+    `section` selects the MOC subsection the entry is listed under ("Notes" by
+    default, "Concepts" for concept explainers).
+
     Callers pass already-normalised tags (frontmatter and the vocabulary must
     agree); this is the single choke point every tagged note flows through, so
     vocabulary registration lives here rather than in each pipeline.
     """
     moc_topic = assign_to_moc(note_title, summary, tags, analysis=analysis)
-    update_moc(moc_topic, note_title, note_path, summary)
+    update_moc(moc_topic, note_title, note_path, summary, section=section)
     register_tags(tags)
 
 
@@ -299,10 +312,13 @@ def find_relevant_clippings(topic: str) -> list[dict]:
 
     Prior research reports (notes in Research/) are excluded from the candidate
     list — they're handled as related work by find_relevant_research(), not as
-    primary sources — so the model never spends a pick on one here.
+    primary sources — so the model never spends a pick on one here. Concept notes
+    (Concepts/) are excluded too: they're textbook explainers cross-listed into
+    MOCs, not primary sources, and _locate_note() couldn't find them anyway.
     """
-    research_titles = {p.stem for p in RESEARCH_PATH.glob("*.md")}
-    catalog = [(t, s) for t, s in _read_moc_catalog() if t not in research_titles]
+    excluded = {p.stem for p in RESEARCH_PATH.glob("*.md")}
+    excluded |= {p.stem for p in CONCEPTS_PATH.glob("*.md")}
+    catalog = [(t, s) for t, s in _read_moc_catalog() if t not in excluded]
     if not catalog:
         return []
 
