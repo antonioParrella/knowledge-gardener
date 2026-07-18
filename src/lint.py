@@ -28,12 +28,18 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    VAULT_PATH, INBOX_PATH, RESEARCH_PATH, INDEX_PATH,
+    VAULT_PATH, INBOX_PATH, RESEARCH_PATH, CONCEPTS_PATH, INDEX_PATH,
     SOURCES_PATH, TRIGGERS_PATH, LINT_REPORT_PATH,
 )
 from notes import read_note, write_note
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]+)?\]\]")
+
+# A MOC's note_count is incremented for every entry added, whether it lands under
+# ## Notes (clippings, research reports) or ## Concepts (concept explainers) — see
+# indexer.update_moc(). Any count/orphan check must therefore look at both sections,
+# or every MOC that has a concept note reads as a false note_count mismatch.
+_MOC_ENTRY_SECTIONS = ("## Notes", "## Concepts")
 
 
 def _md_files(*paths: Path):
@@ -85,10 +91,19 @@ def _wikilinks_in_section(body: str, section: str = "## Notes") -> list[str]:
     return WIKILINK_RE.findall(section_text)
 
 
+def _moc_entry_links(body: str) -> list[str]:
+    """Every wikilink entry that counts toward a MOC's note_count — the union of
+    the ## Notes and ## Concepts sections (see _MOC_ENTRY_SECTIONS)."""
+    links = []
+    for section in _MOC_ENTRY_SECTIONS:
+        links.extend(_wikilinks_in_section(body, section))
+    return links
+
+
 def _all_note_stems() -> set[str]:
     """Collect every .md stem across the vault for orphan-checking."""
     stems = set()
-    for f in _md_files(INBOX_PATH, RESEARCH_PATH, INDEX_PATH, SOURCES_PATH, TRIGGERS_PATH):
+    for f in _md_files(INBOX_PATH, RESEARCH_PATH, CONCEPTS_PATH, INDEX_PATH, SOURCES_PATH, TRIGGERS_PATH):
         stems.add(f.stem)
     return stems
 
@@ -146,7 +161,10 @@ def check_duplicate_sources():
 def check_broken_frontmatter():
     issues = []
     for fp in _md_files(INBOX_PATH, RESEARCH_PATH, INDEX_PATH, SOURCES_PATH, TRIGGERS_PATH):
-        if fp.stem == "_index":
+        # Underscore-prefixed files (_index.md, _tags.md) are agent-managed index and
+        # vocabulary files that intentionally carry no YAML frontmatter — they are not
+        # notes, so linting them for frontmatter is a false positive.
+        if fp.stem.startswith("_"):
             continue
         ok, msg = _raw_frontmatter(fp)
         if not ok:
@@ -166,7 +184,7 @@ def check_moc_note_count():
             continue
         fm, body = read_note(fp)
         expected = int(fm.get("note_count", 0))
-        links = _wikilinks_in_section(body, "## Notes")
+        links = _moc_entry_links(body)
         actual = len(links)
         if expected != actual:
             issues.append({
@@ -174,7 +192,7 @@ def check_moc_note_count():
                 "path": fp,
                 "message": (
                     f"MOC note_count={expected} but found {actual} [[links]] "
-                    f"under ## Notes"
+                    f"under ## Notes/## Concepts"
                 ),
                 "detail": None,
                 "fixable": True,
@@ -190,7 +208,7 @@ def check_orphan_wikilinks():
         if not fp.stem.startswith("MOC - "):
             continue
         _, body = read_note(fp)
-        links = _wikilinks_in_section(body, "## Notes")
+        links = _moc_entry_links(body)
         for link_stem in links:
             if link_stem not in stems:
                 issues.append({
@@ -306,7 +324,7 @@ def report(results: dict, quiet: bool = False):
         check_labels = {
             "duplicate_sources":     "Duplicate source URLs",
             "broken_frontmatter":    "Broken YAML frontmatter",
-            "moc_note_count":        "MOC note_count mismatch",
+            "moc_note_count":        "MOC note_count mismatch (## Notes + ## Concepts)",
             "orphan_wikilinks":      "Orphan wikilinks in MOCs",
             "duplicate_moc_entries": "Duplicate MOC entries",
             "empty_body":            "Empty body notes",
@@ -389,7 +407,8 @@ def auto_fix(results: dict):
                 )
                 if "## Notes\n" in new_body and rebuilt not in new_body:
                     new_body = new_body.replace("## Notes\n", f"## Notes\n{rebuilt}\n\n")
-                fm["note_count"] = len(deduped_links)
+                # Count both sections — deduping ## Notes must not drop the ## Concepts tally.
+                fm["note_count"] = len(_moc_entry_links(new_body))
                 write_note(fp, fm, new_body.strip())
                 print(f"[fix] Deduplicated entries in {fp.stem}")
                 fixed += 1
@@ -400,7 +419,7 @@ def auto_fix(results: dict):
                 fm, body = read_note(fp)
                 pattern = r"^- \[\[" + re.escape(dead_link) + r"\]\].*?\n"
                 new_body = re.sub(pattern, "", body, flags=re.MULTILINE)
-                remaining = _wikilinks_in_section(new_body, "## Notes")
+                remaining = _moc_entry_links(new_body)
                 fm["note_count"] = len(remaining)
                 write_note(fp, fm, new_body.strip())
                 print(f"[fix] Removed orphan [[{dead_link}]] from {fp.stem}")
