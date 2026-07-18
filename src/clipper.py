@@ -18,10 +18,16 @@ from llm import llm_simple, parse_json_response
 from indexer import index_note, format_tag_vocabulary
 
 
-def find_existing_source(source_url: str) -> Path | None:
+def find_existing_source(source_url: str, exclude: Path | None = None) -> Path | None:
     """
     Check if any existing note in Clippings/ or Sources/ already has this source URL.
     Returns the existing note's path if found, None otherwise.
+
+    `exclude` skips one path — pass the note being processed so a same-source check
+    can't match the file against itself. Without it, find returns the first glob
+    match, which may be the current note, and a caller guarding on `existing != path`
+    then silently lets a real duplicate through (how the overnight duplicates slipped
+    past the inline dedup: the stub sorted before its twin in glob order).
     """
     if not source_url or source_url == "unknown":
         return None
@@ -29,6 +35,8 @@ def find_existing_source(source_url: str) -> Path | None:
         if not folder.exists():
             continue
         for md_file in folder.glob("*.md"):
+            if exclude is not None and md_file == exclude:
+                continue
             try:
                 fm, _ = read_note(md_file)
                 if fm.get("source", "").strip() == source_url:
@@ -107,8 +115,8 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
         return path
 
     source_url = fm.get("source", "unknown")
-    existing = find_existing_source(source_url)
-    if existing and existing != path:
+    existing = find_existing_source(source_url, exclude=path)
+    if existing:
         print(f"[clip] DELETE: duplicate source URL — already in {existing.stem}")
         path.unlink()
         return None

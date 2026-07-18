@@ -126,6 +126,12 @@ def _clip_source(url: str, title: str, kind: str, body: str, full_text: bool) ->
     limit = PAPER_CONTENT_LIMIT if (kind == "pdf" and full_text) else CLIP_CONTENT_LIMIT
     final_path = process_clipped_note(clip_path, content_limit=limit)
     if not final_path or not final_path.exists():
+        # Never leave the stub behind. The clipper unlinks on its own discard paths
+        # (duplicate, usable:false), but a JSON-parse failure returns None with the
+        # stub still on disk, and the full-text→abstract fallback abandons the base
+        # file. Either way the watchdog's backlog scan would re-ingest it as a second
+        # clip for the same source — the exact origin of the overnight duplicates.
+        clip_path.unlink(missing_ok=True)
         return None
 
     _, out = read_note(final_path)

@@ -112,10 +112,31 @@ def _all_note_stems() -> set[str]:
 #  Individual checks
 # ═══════════════════════════════════════════════════════════════════
 
+def _clip_quality(fp: Path) -> tuple:
+    """
+    Rank a clip against its duplicates — higher is better, so the best copy is kept.
+    A full-text clip beats an abstract-only stub, a processed clip beats an
+    unprocessed one, and a larger body breaks ties (more content). This is why the
+    research pipeline's full_text flag is the primary signal, not file age.
+    """
+    try:
+        fm, body = read_note(fp)
+    except Exception:
+        return (0, 0, 0)
+    return (
+        1 if fm.get("full_text") is True else 0,
+        1 if fm.get("processed") is True else 0,
+        len(body or ""),
+    )
+
+
 def _pick_duplicate_to_delete(files: list[Path]) -> Path:
     """
     Given a list of files with the same source URL, pick the one to delete.
-    Prefers iCloud ghost files, then 'Copy' in name, then unprocessed, then newest.
+    Prefers iCloud ghost files, then 'Copy'-named files, then the lowest-quality
+    copy (see _clip_quality). The old rule deleted the *newest*, which is usually the
+    full-text reprocess you want to keep — so it dropped the good copy of a research
+    duplicate (abstract stub written first, full text indexed later).
     """
     ghosts = [f for f in files if not f.exists()]
     if ghosts:
@@ -125,11 +146,7 @@ def _pick_duplicate_to_delete(files: list[Path]) -> Path:
     if copies:
         return copies[0]
 
-    unprocessed = [f for f in files if read_note(f)[0].get("processed") is not True]
-    if unprocessed:
-        return unprocessed[0]
-
-    return max(files, key=lambda f: f.stat().st_mtime)
+    return min(files, key=_clip_quality)
 
 
 def check_duplicate_sources():
@@ -427,12 +444,18 @@ def auto_fix(results: dict):
 
             elif check_name == "duplicate_sources":
                 delete_path = issue["fix_data"]["delete"]
+                stem = delete_path.stem
                 if delete_path.exists():
                     delete_path.unlink()
-                    print(f"[fix] Deleted duplicate: {delete_path.stem}")
+                    # Strip the deleted clip's [[link]] from any MOC and fix note_count,
+                    # else deleting the file just manufactures an orphan wikilink. Reuse
+                    # reset_clips' MOC surgery so behaviour matches reset/clean tooling.
+                    from reset_clips import clean_mocs, clean_master_index
+                    clean_master_index(clean_mocs({stem}))
+                    print(f"[fix] Deleted duplicate and stripped its MOC entry: {stem}")
                     fixed += 1
                 else:
-                    print(f"[fix] Skipped (already gone): {delete_path.stem}")
+                    print(f"[fix] Skipped (already gone): {stem}")
 
     if fixed == 0:
         print("[fix] No auto-fixable issues found.")

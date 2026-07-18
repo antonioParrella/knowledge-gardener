@@ -377,15 +377,29 @@ Scans the vault for common issues without using the Gemini API. Detects:
 `--fix` automatically resolves checks 1, 3, 4, 5, and 9:
 | Check | Fix action |
 |-------|-----------|
-| Duplicate sources | Deletes the lesser copy (iCloud ghost > "Copy" > unprocessed > newest) |
+| Duplicate sources | Deletes the lesser copy, then strips its `[[link]]` from any MOC (via `reset_clips` surgery) so deletion doesn't leave an orphan. The keeper is chosen by `_clip_quality`: **full_text over abstract-only, processed over unprocessed, larger body as tiebreaker** — not file age. The old "delete newest" rule dropped the good copy of a research duplicate (abstract stub written first, full text indexed later). |
 | Orphan wikilinks | Removes dead `[[link]]` from MOC, decrements `note_count` |
-| MOC note_count | Updates frontmatter to match actual count |
+| MOC note_count | Updates frontmatter to match actual count (counts `## Notes` **and** `## Concepts`) |
 | Stale _index.md | Removes dead MOC references |
 | Duplicate MOC entries | Deduplicates, updates `note_count` |
 
+MOC checks count entries under both `## Notes` and `## Concepts` (`_moc_entry_links`),
+since `indexer` increments `note_count` for concept explainers too; counting only
+`## Notes` made every MOC with a concept note read as a false mismatch.
+
 ### Inline Duplicate Prevention
 
-`clipper.py` checks for existing notes with the same `source` URL before processing a new clip. If found, the duplicate is deleted and no Gemini call is wasted.
+`clipper.py` checks for existing notes with the same `source` URL before processing a
+new clip (`find_existing_source`). If found, the new clip is deleted and no LLM call is
+wasted. The check passes `exclude=path` so it can't match the note against itself — the
+first glob match is otherwise often the file being processed, and a self-match let real
+duplicates through (a research stub whose title sorted before its twin sailed past the
+`existing != path` guard — the overnight-duplicate origin).
+
+Research source clips get a second layer: `researcher._clip_source` deletes its stub
+whenever `process_clipped_note` returns `None` (discard, JSON-parse failure, or
+full-text→abstract fallback). An abandoned `processed: false` stub would otherwise be
+re-ingested by the watchdog's backlog scan as a second clip for the same source.
 
 ---
 
