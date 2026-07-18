@@ -51,6 +51,18 @@ def _reasoning_extra_body(opts: dict) -> dict | None:
     return {"reasoning": {"effort": effort}}
 
 
+def _completion_kwargs(opts: dict) -> dict:
+    """Build the create() kwargs common to simple and tool_loop from routing opts."""
+    kwargs = {}
+    extra = _reasoning_extra_body(opts)
+    if extra:
+        kwargs["extra_body"] = extra
+    max_tokens = opts.get("max_tokens")
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    return kwargs
+
+
 def _to_openai_tools(tool_schema: list[dict]) -> list[dict]:
     """Adapt the canonical TOOL_SCHEMA (name/description/parameters) to OpenAI form."""
     return [
@@ -92,14 +104,10 @@ def _get_field(msg, key):
 class OpenRouterProvider(Provider):
     def simple(self, prompt: str, system: str = "", model: str | None = None, **opts) -> str:
         try:
-            kwargs = {}
-            extra = _reasoning_extra_body(opts)
-            if extra:
-                kwargs["extra_body"] = extra
             resp = _get_client().chat.completions.create(
                 model=model,
                 messages=_build_messages(prompt, system),
-                **kwargs,
+                **_completion_kwargs(opts),
             )
             _check_complete(resp.choices[0], model)
             return resp.choices[0].message.content or ""
@@ -121,8 +129,7 @@ class OpenRouterProvider(Provider):
         client = _get_client()
         messages = _build_messages(prompt, system)
         tools = _to_openai_tools(tool_schema)
-        extra = _reasoning_extra_body(opts)
-        kwargs = {"extra_body": extra} if extra else {}
+        kwargs = _completion_kwargs(opts)
 
         try:
             for _iteration in range(max_iterations):

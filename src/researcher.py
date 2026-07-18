@@ -262,8 +262,9 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
             + prior_block
         )
 
+    # task="synthesis" routes to OpenRouter ONLY (never Gemini) — see config.ROUTING.
     synthesis_system = load_prompt(system_name)
-    draft = llm_simple(prompt=base, system=synthesis_system, task="research")
+    draft = llm_simple(prompt=base, system=synthesis_system, task="synthesis")
 
     if depth != "comprehensive":
         return draft
@@ -272,10 +273,10 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
     critique = llm_simple(
         prompt=f"{base}\n\n# Draft report\n{draft}",
         system=load_prompt("research_critique"),
-        task="research",
+        task="synthesis",
     )
     revised = llm_simple(
-        task="research",
+        task="synthesis",
         prompt=(
             f"{base}\n\n# Current draft\n{draft}\n\n"
             f"# Reviewer critique to address\n{critique}\n\n"
@@ -288,14 +289,44 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
     return revised
 
 
+# Non-greedy so it also captures *malformed* links whose inner text contains stray
+# brackets — e.g. two citations fused into one pair, `[[A], [B]]`. The old pattern
+# `\[\[([^\]|#]+)\]\]` required a bracket-free interior, so it silently skipped
+# fused links: they were neither detected nor repaired and rendered dead in Obsidian.
+_WIKILINK_RE = re.compile(r"\[\[(.+?)\]\]")
+
+# The exact fusion the model emits: `[[A], [B]]` (and longer) instead of
+# `[[A]], [[B]]`. A stray "], [" between the outer brackets, deterministically split.
+_FUSED_SEP_RE = re.compile(r"\]\s*,\s*\[")
+
+
+def _normalize_fused_wikilinks(report: str) -> str:
+    """Split fused citations like `[[A], [B]]` into `[[A]], [[B]]` deterministically."""
+    def fix(m: re.Match) -> str:
+        inner = m.group(1)
+        if not _FUSED_SEP_RE.search(inner):
+            return m.group(0)
+        parts = [p.strip() for p in _FUSED_SEP_RE.split(inner) if p.strip()]
+        return ", ".join(f"[[{p}]]" for p in parts)
+    return _WIKILINK_RE.sub(fix, report)
+
+
 def _find_bad_wikilinks(report: str, valid_titles: set[str]) -> list[str]:
-    """Return the [[wikilinks]] in the report that don't match a known title."""
+    """
+    Return the [[wikilinks]] in the report that aren't a real note title.
+
+    A well-formed target has no stray brackets; any captured interior containing
+    '[' or ']' is a malformed/fused link and always counts as bad so the repair
+    pass sees it. Alias ('|') and heading ('#') suffixes are stripped for the check.
+    """
     seen, bad = set(), []
-    for link in re.findall(r"\[\[([^\]|#]+)\]\]", report):
-        link = link.strip()
-        if link not in valid_titles and link not in seen:
-            seen.add(link)
-            bad.append(link)
+    for raw in _WIKILINK_RE.findall(report):
+        raw = raw.strip()
+        target = raw.split("|", 1)[0].split("#", 1)[0].strip()
+        malformed = "[" in raw or "]" in raw
+        if (malformed or target not in valid_titles) and raw not in seen:
+            seen.add(raw)
+            bad.append(raw)
     return bad
 
 
@@ -309,6 +340,11 @@ def _repair_wikilinks(report: str, valid_titles: set[str]) -> str:
     hand the report back with the valid titles and have the bad links resolved
     from context. Repair is best-effort: anything still unresolved is logged.
     """
+    # Deterministically split fused citations (`[[A], [B]]` → `[[A]], [[B]]`) before
+    # anything else — no model call needed, and it fixes the common syntax error the
+    # LLM repair used to never even see.
+    report = _normalize_fused_wikilinks(report)
+
     bad = _find_bad_wikilinks(report, valid_titles)
     if not bad:
         return report
@@ -318,15 +354,21 @@ def _repair_wikilinks(report: str, valid_titles: set[str]) -> str:
     print("[research] Running citation repair pass")
 
     title_list = "\n".join(f"- [[{t}]]" for t in sorted(valid_titles))
-    repaired = llm_simple(
-        task="research",
-        system=load_prompt("research_repair_links"),
-        prompt=(
-            f"# Valid note titles\n{title_list}\n\n"
-            f"# Invalid citations to fix\n" + "\n".join(f"- [[{b}]]" for b in bad) + "\n\n"
-            f"# Report\n{report}"
-        ),
-    )
+    try:
+        repaired = llm_simple(
+            task="synthesis",
+            system=load_prompt("research_repair_links"),
+            prompt=(
+                f"# Valid note titles\n{title_list}\n\n"
+                f"# Invalid citations to fix\n" + "\n".join(f"- [[{b}]]" for b in bad) + "\n\n"
+                f"# Report\n{report}"
+            ),
+        )
+    except Exception as e:
+        # A failed/truncated repair call must not discard an otherwise-complete
+        # report — keep the deterministically-normalised version, dead links and all.
+        print(f"[research] Repair pass failed ({e}); keeping report as-is")
+        return report
 
     # Only accept the repair if it actually improved things — a mangled or
     # truncated response must not clobber a report whose prose is fine.
@@ -344,6 +386,33 @@ def _repair_wikilinks(report: str, valid_titles: set[str]) -> str:
     else:
         print("[research] All citations resolved to real notes")
     return repaired
+
+
+class IncompleteReportError(RuntimeError):
+    """Synthesis returned a report that looks cut off mid-generation."""
+
+
+_MIN_REPORT_CHARS = 400
+# A complete report ends on sentence/closing punctuation, a wikilink ']', or
+# markdown emphasis. It ends *badly* — mid-word or on a dangling connector — when
+# synthesis was truncated: the one truncated report we found ended "…difficult for
+# Israeli". Flag those so a half-report is never sealed into the vault as complete.
+_TRUNCATED_TAIL = tuple(",;:–—-")
+
+
+def _assert_report_complete(report: str, topic: str) -> None:
+    """Raise IncompleteReportError if the report looks truncated mid-generation."""
+    text = (report or "").rstrip()
+    if len(text) < _MIN_REPORT_CHARS:
+        raise IncompleteReportError(
+            f"report for '{topic}' is only {len(text)} chars — synthesis likely failed"
+        )
+    last = text[-1]
+    if last.isalnum() or last in _TRUNCATED_TAIL:
+        tail = text[-60:].replace("\n", " ")
+        raise IncompleteReportError(
+            f"report for '{topic}' appears truncated — ends mid-sentence: “…{tail}”"
+        )
 
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -396,6 +465,32 @@ def _research_note_name(fm: dict, topic: str, report: str) -> str:
         return f"Research - {derived}.md"
 
     return f"Research - {safe_filename(topic)}.md"
+
+
+def _renamed_trigger_path(path: Path, output_name: str) -> Path | None:
+    """
+    Where to move a completed trigger so it reads as the report it generated,
+    instead of the ad-hoc title typed on the phone ("Untitled", "research - x").
+
+    Named after the report with the "Research - " prefix stripped, so the trigger
+    never *shares* a basename with the report — a duplicate basename makes
+    [[wikilinks]] ambiguous in Obsidian. Returns None when renaming isn't safe:
+    already named that, the report kept no prefix (so the names would collide), or
+    a note with the target name already exists in the folder.
+    """
+    report_stem = output_name[:-3] if output_name.endswith(".md") else output_name
+    trigger_stem = report_stem
+    prefix = "Research - "
+    if trigger_stem.startswith(prefix):
+        trigger_stem = trigger_stem[len(prefix):].strip()
+    trigger_stem = safe_filename(trigger_stem)
+
+    if not trigger_stem or trigger_stem == report_stem:
+        return None
+    dest = path.parent / f"{trigger_stem}.md"
+    if dest == path or dest.exists():
+        return None
+    return dest
 
 
 # ── Core pipeline ────────────────────────────────────────────────────────────────
@@ -456,7 +551,22 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     valid_titles |= {p["title"] for p in prior_research}
     report = _repair_wikilinks(report, valid_titles)
 
+    # Gate: never write/index a report that was cut off mid-generation. Raising here
+    # aborts before the trigger is marked done, so it stays pending and retries (the
+    # already-vaulted sources are reused). Skipped for the no-sources stub, which is
+    # legitimately short and would otherwise retry forever.
+    if all_sources or prior_research:
+        _assert_report_complete(report, topic)
+
     return report, all_sources
+
+
+# Leading completion banner stripped before re-preserving the brief on completion,
+# so re-completing a trigger never stacks banners. Matches the current callout form
+# and the legacy "Research completed. See [[…]]." line for back-compat.
+_COMPLETION_BANNER_RE = re.compile(
+    r"\A\s*(?:> \[!done\] )?Research completed[^\n]*\n*", re.IGNORECASE
+)
 
 
 # A trigger can gate itself behind a '## Ready' checkbox so a half-written brief
@@ -653,11 +763,30 @@ def process_research_trigger(path: Path):
         analysis=report,
     )
 
-    # Mark trigger as done so watchdog doesn't reprocess
+    # Mark trigger as done so watchdog doesn't reprocess (only the `research` flag
+    # gates reprocessing, not the body). Preserve the original brief below a
+    # completion banner rather than overwriting it — otherwise re-running a trigger
+    # (flip research: done → true) would feed the completion note in as the brief.
+    # Strip any prior banner so re-completion doesn't stack them.
     fm["research"] = "done"
     fm["completed"] = today()
-    write_note(path, fm, f"Research completed. See [[{output_name.replace('.md', '')}]].")
-    print(f"[research] Done: '{topic}'")
+    banner = f"> [!done] Research completed — see [[{output_name.replace('.md', '')}]]."
+    preserved = _COMPLETION_BANNER_RE.sub("", body).lstrip()
+    done_body = f"{banner}\n\n{preserved}" if preserved else banner
+
+    # Mark done in place first (so the trigger can never be reprocessed), then move
+    # it to match the report name — a best-effort, purely cosmetic rename so the
+    # leftover triggers read as their reports rather than phone-typed titles.
+    write_note(path, fm, done_body)
+    dest = _renamed_trigger_path(path, output_name)
+    if dest is None:
+        print(f"[research] Done: '{topic}'")
+    else:
+        try:
+            path.rename(dest)
+            print(f"[research] Done: '{topic}' — trigger renamed → {dest.name}")
+        except OSError as e:
+            print(f"[research] Done: '{topic}' (trigger rename skipped: {e})")
 
 
 # ── Inline research callouts ─────────────────────────────────────────────────────

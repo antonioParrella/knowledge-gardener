@@ -174,13 +174,18 @@ obsidian_system/
       into the sources), so the report builds on and cross-links to them under
       "## Related research" without citing them as primary evidence or listing
       them under "## Sources". standard/deep = single draft; comprehensive =
-      draft → critique (research_critique) → revise. Citations are then checked
-      and repaired by _repair_wikilinks() (its valid set includes
-      prior-research titles).
+      draft → critique (research_critique) → revise — all on OpenRouter only
+      (task `synthesis`, never Gemini). Citations are then checked and repaired by
+      _repair_wikilinks() (valid set includes prior-research titles), and a report
+      that comes back cut off mid-generation is rejected by _assert_report_complete()
+      before anything is written, so the trigger stays pending and retries instead
+      of committing a half-report.
 
 4. Report saved to Research/, indexed into a MOC, trigger marked research: done.
    The filename comes from _research_note_name(): an explicit `output:` in the
    trigger wins, else the report's own H1 (trimmed of subtitle), else the topic.
+   The trigger's brief body is kept under a completion banner (not overwritten), so
+   a trigger can be cleanly re-run later by flipping research: done → true.
 ```
 
 ### Citation integrity
@@ -206,10 +211,20 @@ makes it a matter of luck rather than load. Three mechanisms defend against it:
    if it actually reduces the invalid-link count and doesn't shrink the report — a
    mangled repair must never clobber good prose. This replaced `_validate_wikilinks()`,
    which only printed a warning and wrote the broken report to the vault anyway.
+4. **Malformed-link normalisation.** Synthesis also fuses adjacent citations into
+   one pair — `[[A], [B]]` instead of `[[A]], [[B]]` — which the old detector's
+   regex couldn't even see (it required a bracket-free interior).
+   `_normalize_fused_wikilinks()` splits them deterministically before the repair
+   pass, and `_find_bad_wikilinks()` now flags any link with a stray interior
+   bracket, so nothing malformed slips through.
 
-Relatedly, the OpenRouter provider raises on `finish_reason == "length"`, so a
-report truncated mid-sentence by the output cap fails over to the next chain
-entry instead of being written to the vault as if complete.
+Two backstops keep a truncated report out of the vault. Both providers now raise on
+a cut-off generation — OpenRouter on `finish_reason == "length"`, Gemini on
+`MAX_TOKENS` (`_extract_text`) — so it errors / fails over instead of returning half
+a report. Because a fail-over target could truncate too, `_assert_report_complete()`
+is the final gate: a report still ending mid-sentence is rejected before it is
+written or indexed, and the trigger stays pending to retry. Synthesis is also routed
+OpenRouter-only (`synthesis` task), so reports are never written by Gemini.
 
 ### Inline Research Callouts
 
@@ -520,8 +535,10 @@ after the agent has processed the note so it never gets processed twice.
   ```
   Restart your terminal after running this. `TAVILY_API_KEY` is optional —
   without it, research falls back to the academic sources only. `OPENROUTER_API_KEY`
-  is optional too — without it the router skips OpenRouter and uses Gemini for every
-  task (research quality reverts to free Gemini Flash).
+  is **required for research reports**: synthesis is routed OpenRouter-only (the
+  `synthesis` task has no Gemini fallback), so without the key a research run
+  gathers sources but the report itself fails and the trigger retries. The cheap
+  `clip`/`moc` tasks still run fine on free Gemini without it.
 
 ### 3. Python Dependencies
 ```bash
@@ -605,15 +622,40 @@ in turn, falling through on daily-quota exhaustion or provider errors (an unset
 |------------------|---------|----------|
 | `clip` — clip/PDF summaries (`clipper.py`, `pdf_processor.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
 | `moc` — MOC assignment + relevance (`indexer.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
-| `research` — discovery loop + synthesis (`researcher.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
+| `research` — discovery tool loop only (`researcher.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
+| `synthesis` — the report: draft/critique/revise/repair (`researcher.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | **none — OpenRouter only** |
 
 Free Gemini Flash carries the high-volume cheap tasks until its daily quota is
 hit, then DeepSeek V4 Flash (via OpenRouter) takes over (better than Flash-Lite,
-no quota cliff, ~cents). Research runs on DeepSeek V4 Pro at OpenRouter's
-normalized `reasoning={"effort": "xhigh"}` — frontier-class synthesis at ~1/15th
-of an Opus-tier model. The paid models go through one OpenRouter key
-(`OPENROUTER_API_KEY`); adding a provider or re-routing a task is a one-line edit
-to `ROUTING`. Note `thinking_level` is `high` on every Gemini call (`config.py`).
+no quota cliff, ~cents). Discovery (`research`) still falls back to Gemini — it only
+gathers sources, which become Gemini-processed clippings anyway. The report itself
+(`synthesis`) runs on DeepSeek V4 Pro at OpenRouter's normalized
+`reasoning={"effort": "xhigh"}` with an explicit `max_tokens`
+(`RESEARCH_MAX_OUTPUT_TOKENS`) and has **no Gemini fallback** — reports must always
+be written and reviewed by OpenRouter, so if it is unavailable the run fails and
+retries rather than producing a lower-tier report. Adding a provider or re-routing a
+task is a one-line edit to `ROUTING`. `thinking_level` is `high` on every Gemini
+call (`config.py`).
+
+---
+
+## Logs & Debugging
+
+Three things that aren't obvious when debugging a run:
+
+- **The log is `VAULT_PATH.parent/watchdog.log`** — beside the vault, *not* in the
+  repo (don't conclude "there are no logs" from searching the project dir). It
+  captures the whole pipeline's stdout — the `[research]` / `[llm]` / provider
+  trace, finish reasons, fall-throughs — not just the watchdog's own events, and is
+  flushed per line so it survives a mid-run kill. Rotates at 10 MB × 5.
+- **The vault is on iCloud** (`config.VAULT_PATH`), which is slow: a recursive
+  grep/glob over the whole vault can time out — scope searches to one subfolder.
+- **Truncated report ≠ manual stop.** An interrupted/crashed run writes no report
+  and leaves the trigger `research: true` (retried next rescan). A report that
+  *exists* but ends mid-sentence with its trigger `research: done` is a silent
+  synthesis truncation that went through the success path — `_assert_report_complete()`
+  now blocks that, and the completeness of a report is judged by its last character,
+  not its length.
 
 ---
 

@@ -78,6 +78,13 @@ GEMINI_FLASH    = "gemini-3-flash-preview"
 OR_FLASH        = "deepseek/deepseek-v4-flash"
 OR_PRO          = "deepseek/deepseek-v4-pro"
 
+# Explicit output ceiling for report synthesis. Comprehensive reports run to many
+# thousands of words; relying on a provider's *default* output cap is how a report
+# gets silently truncated mid-sentence. Set it high and deliberate so truncation is
+# a ceiling we chose (and can see in logs), not a hidden default. Passed as
+# `max_tokens` (OpenRouter) / `max_output_tokens` (Gemini) via the routing opts.
+RESEARCH_MAX_OUTPUT_TOKENS = 32000
+
 ROUTING = {
     "clip": [
         ("gemini",     GEMINI_FLASH_35, {}),
@@ -89,10 +96,21 @@ ROUTING = {
         ("gemini",     GEMINI_FLASH,    {}),
         ("openrouter", OR_FLASH,        {}),
     ],
+    # Discovery tool loop only — it gathers sources that become Gemini-processed
+    # clippings, so a Gemini fallback here is acceptable when OpenRouter is down.
     "research": [
         ("openrouter", OR_PRO,          {"reasoning_effort": "xhigh"}),
         ("gemini",     GEMINI_FLASH_35, {}),
         ("gemini",     GEMINI_FLASH,    {}),
+    ],
+    # The report itself — draft, critique, revise, citation repair. OpenRouter
+    # ONLY: research reports must always be written and reviewed by DeepSeek V4
+    # Pro, never Gemini. If OpenRouter is unavailable the synthesis call raises,
+    # the run fails, and the trigger stays pending to retry later — which is far
+    # better than committing a lower-tier report as if it were the real thing.
+    "synthesis": [
+        ("openrouter", OR_PRO, {"reasoning_effort": "xhigh",
+                                "max_tokens": RESEARCH_MAX_OUTPUT_TOKENS}),
     ],
 }
 

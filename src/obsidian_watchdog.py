@@ -17,6 +17,7 @@ import sys
 import time
 import logging
 import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -43,18 +44,69 @@ from pdf_processor import process_pdf, find_unprocessed_pdfs
 PIPELINE_LOCK = threading.Lock()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+# The whole pipeline diagnoses itself through print() (provider fall-through, the
+# [research] phase trace, tool calls, errors). A plain FileHandler only captured
+# the watchdog's own log.* calls, so the persistent log was near-useless for
+# diagnosing a run — everything interesting went to stdout and vanished. We fix
+# that by (1) rotating file + console handlers bound to the *real* stdout, then
+# (2) redirecting sys.stdout/stderr into the logger so every print() is persisted,
+# timestamped, and flushed per line — so the log is complete even if the process
+# is killed mid-run. Handlers flush on each emit, so nothing is lost on a crash.
+_real_stdout = sys.stdout  # captured before redirection to avoid a write-back loop
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(VAULT_PATH.parent / "watchdog.log", encoding="utf-8"),
+        logging.StreamHandler(_real_stdout),
+        RotatingFileHandler(
+            VAULT_PATH.parent / "watchdog.log",
+            maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        ),
     ],
 )
 log = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("google.genai").setLevel(logging.WARNING)
 logging.getLogger("google_genai").setLevel(logging.WARNING)
+
+
+class _StreamToLogger:
+    """
+    File-like shim that turns writes (print(), sys.stdout.write) into log records,
+    so the entire pipeline's stdout/stderr lands in watchdog.log — not just the
+    watchdog's own log.* calls. Bound to the real console via the logging handlers
+    above, so there is no write-back loop.
+    """
+
+    encoding = "utf-8"
+
+    def __init__(self, logger: logging.Logger, level: int):
+        self._logger = logger
+        self._level = level
+        self._buf = ""
+
+    def write(self, msg: str) -> int:
+        self._buf += msg
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._logger.log(self._level, line)
+        return len(msg)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            self._logger.log(self._level, self._buf)
+        self._buf = ""
+
+    def isatty(self) -> bool:
+        return False
+
+
+# Capture everything the pipeline prints. stdout → INFO, stderr → ERROR.
+_pipeline_logger = logging.getLogger("pipeline")
+sys.stdout = _StreamToLogger(_pipeline_logger, logging.INFO)
+sys.stderr = _StreamToLogger(_pipeline_logger, logging.ERROR)
 
 
 # ── Startup checks ────────────────────────────────────────────────────────────
