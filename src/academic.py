@@ -163,8 +163,11 @@ def extract_paper_text(pdf_url: str, landing_url: str = "") -> str:
             if text.strip():
                 return text
 
-    # Fallback: scrape the landing page (lazy import avoids circular dependency)
-    if landing_url:
+    # Fallback: scrape the landing page (lazy import avoids circular dependency).
+    # Never re-fetch the PDF itself as a "landing page" — fetching a PDF URL returns
+    # raw bytes, not text, which is exactly how garbled-PDF clips were created. Skip
+    # when the landing URL is the PDF we already tried, or is itself a PDF.
+    if landing_url and landing_url != pdf_url and not landing_url.lower().endswith(".pdf"):
         from web_tools import fetch_url
         text = fetch_url(landing_url)
         if text and not text.startswith("Failed to fetch"):

@@ -132,6 +132,17 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
         print(f"[clip] JSON parse failed for {path.name}, leaving original untouched.")
         return None
 
+    # The analyzer flags content that isn't the real document — raw PDF/binary bytes,
+    # a bot-wall / CAPTCHA / paywall interstitial, an error page — as usable: false.
+    # Don't turn those into clips: discard the stub (like the duplicate path above) so
+    # the research pipeline falls back to an abstract-only clip and the vault isn't
+    # polluted with garbage notes. Absent/true (the normal case) processes as usual.
+    if data.get("usable") is False:
+        reason = (data.get("title") or "not real content").strip()
+        print(f"[clip] Discarding — content not usable ({reason}): {path.name}")
+        path.unlink(missing_ok=True)
+        return None
+
     summary_title = data.get("title", path.stem)
     clean_title = safe_filename(summary_title)
 

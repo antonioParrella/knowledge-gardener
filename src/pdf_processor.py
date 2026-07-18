@@ -80,6 +80,19 @@ def process_pdf(path: Path):
         print(f"[pdf] JSON parse failed for {path.name}, leaving for retry.")
         return
 
+    # Not the real document (e.g. a scanned/image PDF that extracted to gibberish) —
+    # archive it so it isn't retried forever, but don't index a junk note.
+    if data.get("usable") is False:
+        archive_dest = _archive_path_for(path)
+        try:
+            shutil.copy2(str(path), str(archive_dest))
+            path.unlink()
+            print(f"[pdf] Discarded — content not usable: {path.name} → {archive_dest.parent.name}/")
+        except Exception as e:
+            archive_dest.unlink(missing_ok=True)
+            print(f"[pdf] Unusable content but could not archive {path.name}: {e}")
+        return
+
     title = data.get("title", path.stem)
     clean_title = safe_filename(title)
     tags = normalize_tags(data.get("tags", []))

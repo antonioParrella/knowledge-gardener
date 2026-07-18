@@ -99,6 +99,43 @@ def _load_existing(path: Path) -> dict | None:
     return {"title": path.stem, "analysis": analysis}
 
 
+def _clip_source(url: str, title: str, kind: str, body: str, full_text: bool) -> dict | None:
+    """
+    Write a queued source's text as a clip stub and run it through the clipper
+    pipeline, returning {title, analysis, raw} — or None if the clipper discarded it
+    (e.g. its analyzer judged the content not to be the real document, or a dup race).
+    """
+    clip_path = INBOX_PATH / f"{safe_filename(title)}.md"
+    if clip_path.exists():
+        # name collision with an unrelated note — disambiguate
+        clip_path = INBOX_PATH / f"{safe_filename(title)} ({today()}).md"
+
+    write_note(
+        clip_path,
+        frontmatter={
+            "clipped": True,
+            "source": url,
+            "date": today(),
+            "processed": False,
+            "source_type": "research_found",
+            "full_text": full_text,
+        },
+        body=body,
+    )
+
+    limit = PAPER_CONTENT_LIMIT if (kind == "pdf" and full_text) else CLIP_CONTENT_LIMIT
+    final_path = process_clipped_note(clip_path, content_limit=limit)
+    if not final_path or not final_path.exists():
+        return None
+
+    _, out = read_note(final_path)
+    analysis = out.split("## Original Content")[0].strip()
+    raw = ""
+    if "## Original Content" in out:
+        raw = out.split("## Original Content", 1)[1].strip()[:SYNTHESIS_RAW_EXCERPT]
+    return {"title": final_path.stem, "analysis": analysis, "raw": raw}
+
+
 def _process_source(entry: dict) -> dict | None:
     """
     Fetch a queued source's full text, write it as a clip, and run the clipper
@@ -122,51 +159,30 @@ def _process_source(entry: dict) -> dict | None:
     else:
         from web_tools import fetch_url
         text = fetch_url(url)
-
-    # Fall back to an abstract-only clipping when full text can't be retrieved
-    # (e.g. paywalled PDFs). The source is still kept and citable, just thinner.
     full_text_ok = bool(text) and not text.startswith("Failed to fetch")
-    if not full_text_ok:
-        if not abstract:
-            print(f"[research] Could not retrieve source and no abstract available: {url}")
-            return None
-        print(f"[research] Full text unavailable — keeping abstract-only: {title}")
-        text = (
+
+    # Try the full text first. The clipper's analyzer judges whether the retrieved
+    # text is the real document; if it isn't (raw PDF bytes, a bot-wall / CAPTCHA /
+    # paywall interstitial), process_clipped_note discards the stub and _clip_source
+    # returns None — so we fall through to the abstract. A clean, thin, citable clip
+    # beats a garbage one.
+    if full_text_ok:
+        result = _clip_source(url, title, kind, text, full_text=True)
+        if result:
+            return result
+        print(f"[research] Full text unusable — falling back to abstract: {title}")
+
+    # Abstract-only fallback: full text couldn't be retrieved (e.g. paywalled PDF) or
+    # was judged not to be the real document above. Still kept and citable, just thinner.
+    if abstract:
+        body = (
             "> [!warning] Abstract only — full text could not be retrieved.\n\n"
             f"## Abstract\n{abstract}"
         )
+        return _clip_source(url, title, kind, body, full_text=False)
 
-    # Write the clip stub, then process it through the clipper pipeline
-    clip_path = INBOX_PATH / f"{safe_filename(title)}.md"
-    if clip_path.exists():
-        # name collision with an unrelated note — disambiguate
-        clip_path = INBOX_PATH / f"{safe_filename(title)} ({today()}).md"
-
-    write_note(
-        clip_path,
-        frontmatter={
-            "clipped": True,
-            "source": url,
-            "date": today(),
-            "processed": False,
-            "source_type": "research_found",
-            "full_text": full_text_ok,
-        },
-        body=text,
-    )
-
-    limit = PAPER_CONTENT_LIMIT if (kind == "pdf" and full_text_ok) else CLIP_CONTENT_LIMIT
-    final_path = process_clipped_note(clip_path, content_limit=limit)
-    if not final_path or not final_path.exists():
-        print(f"[research] Clipper processing failed for: {title}")
-        return None
-
-    _, body = read_note(final_path)
-    analysis = body.split("## Original Content")[0].strip()
-    raw = ""
-    if "## Original Content" in body:
-        raw = body.split("## Original Content", 1)[1].strip()[:SYNTHESIS_RAW_EXCERPT]
-    return {"title": final_path.stem, "analysis": analysis, "raw": raw}
+    print(f"[research] No usable source and no abstract available: {url}")
+    return None
 
 
 # ── Phase 4 helpers — synthesis ──────────────────────────────────────────────────
@@ -711,16 +727,16 @@ def process_research_trigger(path: Path):
     brief = _DEPTH_SECTION_RE.sub("", brief)
     brief = _READY_SECTION_RE.sub("", brief).strip()
 
-    # `or`-fallbacks (not .get defaults) so a present-but-empty YAML key — common
-    # when a trigger is hand-edited from the template on a phone — falls back
-    # instead of yielding None and crashing downstream. A trigger whose `topic:`
-    # is empty and whose filename is the Obsidian default ("Untitled") carries no
-    # topic at all: fall back to the brief, which is where the real question is,
-    # rather than researching the literal string "Untitled".
-    topic = fm.get("topic") or path.stem.replace("research - ", "").strip()
-    if topic.lower().startswith("untitled") and brief:
+    # The trigger note's TITLE is its research topic. The old `topic:` frontmatter
+    # field was removed from the template — it was redundant with the Details
+    # brief, so the note name now carries the focused phrase and the brief the
+    # detail. A note left at Obsidian's "Untitled" default (or with an empty name)
+    # carries no topic in its title: fall back to the brief, where the real
+    # question is, rather than researching the literal string "Untitled".
+    topic = path.stem.replace("research - ", "").strip()
+    if (not topic or topic.lower().startswith("untitled")) and brief:
         topic = " ".join(brief.split())[:300]
-        print(f"[research] Trigger has no topic; using the brief: '{topic[:80]}…'")
+        print(f"[research] Trigger has no topic in its title; using the brief: '{topic[:80]}…'")
 
     print(f"[research] Starting: '{topic}' (depth: {depth})")
 

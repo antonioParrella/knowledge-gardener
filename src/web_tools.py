@@ -142,6 +142,15 @@ def fetch_url(url: str) -> str:
         )
         resp.raise_for_status()
 
+        # Refuse non-HTML / binary bodies. A PDF (or other binary) served at this URL
+        # is not web text: decoding its bytes and stripping "tags" yields garbage, not
+        # an article — exactly how garbled-PDF clips were created. PDFs are retrieved
+        # and extracted by extract_paper_text, not here. Returning the "Failed to
+        # fetch" sentinel makes callers fall back cleanly (abstract-only clip).
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if resp.content[:5] == b"%PDF-" or (ctype and "html" not in ctype and "text" not in ctype):
+            return f"Failed to fetch {url}: non-HTML content ({ctype or 'binary'})"
+
         # Strip HTML
         text = re.sub(r"<script[^>]*>.*?</script>", " ", resp.text, flags=re.DOTALL)
         text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)

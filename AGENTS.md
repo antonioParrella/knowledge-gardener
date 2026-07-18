@@ -100,6 +100,7 @@ obsidian_system/
     ├── pdf_processor.py     ← PDF text extraction + summarisation
     ├── obsidian_watchdog.py ← Main entry point, file system monitor
     ├── reset_clips.py       ← Standalone script to revert clips to original
+    ├── clean_junk_clips.py  ← One-off: purge junk clips (garbled PDFs, bot-walls) + fix MOCs
     ├── consolidate_tags.py  ← One-time backfill: unify drifted tags → canonical vocabulary
     └── lint.py              ← Vault health checker (run periodically)
 ```
@@ -131,9 +132,8 @@ obsidian_system/
 ### Research Pipeline
 
 ```
-1. You create a trigger note on iPhone in _triggers/:
+1. You create a trigger note on iPhone in _triggers/ (its TITLE is the topic):
       research: true
-      topic: "quantum computing breakthroughs"
       depth: comprehensive   # standard | deep | comprehensive
       urls:                  # optional seed URLs
         - https://...
@@ -160,12 +160,19 @@ obsidian_system/
       queue_source(url, title, kind, reason, abstract) for each keeper.
       No source cap; already-vaulted URLs are skipped.
    ③ _process_source() for each queued source:
-      - pdf  → academic.extract_paper_text() downloads the PDF and
-               extracts full text (falls back to landing-page scrape)
-      - web  → web_tools.fetch_url()
-      - on failure with an abstract → abstract-only clip (full_text: false)
-      The text is written to Clippings/ (source_type: research_found) and
-      run through clipper.process_clipped_note() → indexed into a MOC.
+      - pdf  → academic.extract_paper_text() downloads the PDF and extracts
+               full text (falls back to a landing-page scrape, but never by
+               re-fetching the PDF URL itself — that returns raw bytes)
+      - web  → web_tools.fetch_url() (refuses non-HTML/binary responses, so a
+               PDF served at a URL is rejected instead of dumped in as "text")
+      The text is written to Clippings/ (source_type: research_found) and run
+      through clipper.process_clipped_note(), which returns a `usable` verdict.
+      If the analyzer judges the content to be non-content — raw PDF/binary
+      bytes, a bot-wall / CAPTCHA / paywall interstitial, an error page — the
+      stub is discarded and _process_source falls back to an abstract-only clip
+      (full_text: false), or skips the source if there's no abstract. A blocked
+      source thus becomes a clean, thin, citable clip rather than a garbage note
+      (see *Rejecting non-content* below). A real source is indexed into a MOC.
    ④ _synthesise() — builds a source index of exact [[wikilink]] titles
       and writes the report. The index is deliberately **unnumbered**: an
       ordinal beside each title gives the model a number to cite instead of
@@ -183,7 +190,8 @@ obsidian_system/
 
 4. Report saved to Research/, indexed into a MOC, trigger marked research: done.
    The filename comes from _research_note_name(): an explicit `output:` in the
-   trigger wins, else the report's own H1 (trimmed of subtitle), else the topic.
+   trigger wins, else the report's own H1 (trimmed of subtitle), else the topic
+   (the note's title).
    The trigger's brief body is kept under a completion banner (not overwritten), so
    a trigger can be cleanly re-run later by flipping research: done → true.
 ```
@@ -284,6 +292,50 @@ existing filename on reprocess, so wikilinks never break — only the analysis,
 one-line summary, and MOC assignment are regenerated. The flag is consumed
 (popped) on the first reprocess and never persists. Brand-new clips (no flag)
 are renamed to their clean Gemini title as usual.
+
+### Rejecting non-content (the `usable` gate)
+
+A research fetch doesn't always return the article. A PDF can download fine yet
+extract to nothing (subsetted fonts, scanned images); an anti-scraping page
+(Cloudflare, reCAPTCHA, Anubis) or a paywall/login wall returns HTTP 200 with an
+interstitial instead of the paper. Left unchecked, that garbage became a real,
+indexed, citable clip — and worse, feeding a bot-wall page to the analyzer made
+it *hallucinate* a plausible-looking summary from the title alone. Three layers
+now stop this, cheapest first:
+
+1. **`fetch_url` refuses non-HTML/binary responses.** It checks `Content-Type`
+   and sniffs `%PDF-` magic bytes; a PDF (or other binary) served at a URL is not
+   web text, so it returns the `Failed to fetch` sentinel rather than decoding
+   raw bytes into "text". Deterministic — no false positives on real articles.
+2. **`extract_paper_text` never re-fetches the PDF as its own landing page.** The
+   landing-page fallback is skipped when the landing URL equals the PDF URL or is
+   itself a `.pdf` — re-fetching it could only ever return bytes. (This was the
+   exact bug behind the `%PDF-…endobj…stream` byte-dump clips.)
+3. **The clip analyzer decides the semantic cases.** `clip_analysis` returns a
+   `usable` boolean; the model — which already reads the content — sets it `false`
+   for binary dumps, CAPTCHA/paywall/JS interstitials, and error pages, and
+   `true` for genuine content (even a thin abstract). This is the only reliable
+   test for interstitials: keyword-matching "reCAPTCHA"/"proof-of-work" would
+   false-positive on a real article *about* those topics. `clipper.py` discards a
+   `usable: false` stub (`pdf_processor.py` archives it), and `_process_source`
+   falls back to the abstract.
+
+**Backfill (`clean_junk_clips.py`).** The gate only prevents *future* junk;
+clips saved before it were removed with a one-off, reviewable pass (like
+`consolidate_tags.py`):
+
+```
+python src/clean_junk_clips.py            # DRY RUN: list junk (raw-PDF / interstitial) + snippets
+python src/clean_junk_clips.py --apply    # delete them, then fix MOCs and _index.md
+```
+
+It classifies each clip from its captured `## Original Content` (raw-PDF tokens,
+mojibake ratio, short pages carrying bot-wall markers) and the analyzer's own
+failure admissions, prints every candidate for review, and — with `--apply` —
+deletes them and reuses `reset_clips`' MOC surgery so each `[[link]]` is stripped,
+`note_count` decremented, and emptied MOCs deleted. Abstract-only clips (a real
+abstract under a warning callout) are never flagged. Report/concept notes that
+cite a removed clip are reported, not auto-edited (report prose is the user's).
 
 ### Discovery tools & queue_source
 
@@ -426,10 +478,12 @@ self, so nothing is silently lost.
 Create this in `_triggers/` from your iPhone (the `Templates/Research Trigger.md`
 template in the vault scaffolds it for you):
 
+The note's **title** is the topic (name it "Quantum computing breakthroughs
+2025"), so there is no `topic:` field — the frontmatter is just plumbing:
+
 ```markdown
 ---
 research: true
-topic: "quantum computing breakthroughs 2025"
 urls:
   - https://specific-article.com/to-include
 output: "Research - Quantum Computing.md"
@@ -450,23 +504,27 @@ pop-science coverage. We care about what's actually shipping in hardware.
 - [ ] Ends with a short "what to watch next" section
 ```
 
+**The title is the topic.** There is no `topic:` frontmatter field — it was
+redundant with the Details brief, so the note's name now carries the focused
+phrase and the brief carries the detail. `process_research_trigger` reads the
+topic from the note's filename stem (a leading "research - " is stripped).
+
 **Naming.** `output:` is optional and only needed to pin an exact filename.
 Without it the note is named from the finished report's own H1 — synthesis writes
 a far better title than a trigger keyword ("Research - World Models and Their
 Origins" rather than "Research - World Models"), and that title used to be
 discarded. A subtitle after `:` / `–` is trimmed. Only if the report has no H1
-does the `topic` become the name.
+does the topic (the note's title) become the name.
 
-**A missing topic falls back to the brief.** `topic:` and the filename are both
-`or`-fallbacks, so a trigger created from the phone's + button and left with
-`topic: null` used to be named from its filename stem — yielding a real run
-titled `Research - Untitled` that also searched prior knowledge for the literal
-string "Untitled". An empty topic on an `Untitled*` note now falls back to the
+**An empty title falls back to the brief.** A trigger created from the phone's
++ button and left at the Obsidian default carries no topic in its title —
+naming a run `Research - Untitled` that also searched prior knowledge for the
+literal string "Untitled". An empty or `Untitled*` title now falls back to the
 brief, where the actual question is.
 
 The frontmatter drives the run; the `## Details` and `## Acceptance Criteria`
 body sections are passed to the agent as a brief (see *Inline Research Callouts*
-above). Both body sections are optional — omit them for a topic-only run.
+above). Both body sections are optional — omit them for a title-only run.
 
 **Depth** is chosen by ticking one box in a `## Depth` checklist — a plugin-free
 "pick one" that works by tapping on mobile. `_depth_from_body()` reads the first
