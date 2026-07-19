@@ -61,7 +61,12 @@ def _build_discovery_prompt(topic: str, depth: str, seed_urls: list[str],
     if existing:
         known = "\n".join(f"- [[{c['title']}]]" for c in existing)
         parts.append(
-            "## Already in the knowledge base (do not re-discover these):\n" + known
+            "## Already in the knowledge base — current coverage of this topic\n"
+            "These sources are already indexed. Use them as a picture of current "
+            "coverage: aim your searches at what's missing, newer, or better, and "
+            "don't queue a source that just restates what one of these already covers "
+            "as well. The more this list already covers the topic, the less new "
+            "material there is to add.\n\n" + known
         )
 
     if prior_research:
