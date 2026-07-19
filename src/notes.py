@@ -37,6 +37,32 @@ def safe_filename(title: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", title).strip()
 
 
+def safe_rename(src: Path, dst: Path, retries: int = 5, delay: float = 0.4) -> Path:
+    """
+    Rename src -> dst, tolerant of transient Windows/iCloud file locks.
+
+    The vault lives on iCloud Drive: its sync daemon (and Windows Defender)
+    opens a freshly-written file to upload/scan it, and on Windows a rename of a
+    file another process has open fails with PermissionError (WinError 32). That
+    is transient — the handle is released within a second or two — so we retry
+    with a short backoff. If it still won't budge, we keep the existing name
+    rather than crash: the note is fully valid, only its filename is suboptimal,
+    and a run-ending exception over a cosmetic rename is the worse outcome.
+
+    Returns the path the note now lives at (dst on success, src on give-up).
+    """
+    for attempt in range(retries):
+        try:
+            src.rename(dst)
+            return dst
+        except PermissionError as e:
+            if attempt == retries - 1:
+                print(f"[notes] Rename locked, keeping name '{src.name}': {e}")
+                return src
+            time.sleep(delay * (attempt + 1))
+    return src
+
+
 # Any run of non-alphanumeric characters collapses to a single hyphen, so
 # "Machine Learning", "machine_learning" and "machine/learning" all canonicalise
 # the same way.

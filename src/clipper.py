@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from config import CLIP_CONTENT_LIMIT, VAULT_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
-from notes import read_note, write_note, safe_filename, today, normalize_tags
+from notes import read_note, write_note, safe_filename, safe_rename, today, normalize_tags
 from llm import llm_simple, parse_json_response
 from indexer import index_note, format_tag_vocabulary
 
@@ -166,8 +166,7 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     if clean_title != path.stem and not preserve_title:
         new_path = path.parent / f"{clean_title}.md"
         if not new_path.exists():
-            path.rename(new_path)
-            path = new_path
+            path = safe_rename(path, new_path)
 
     summary_body = f"{analysis}\n\n---\n\n## Original Content\n\n{body}"
 
