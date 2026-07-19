@@ -251,24 +251,64 @@ OpenRouter-only (`synthesis` task), so reports are never written by Gemini.
 
 Add `> [!research] your question` anywhere in **any** note in the vault. On the
 next periodic rescan, `find_research_callouts()` — which scans the whole vault
-recursively (`VAULT_PATH`), skipping `_triggers/`, `.obsidian/`, `.trash/` —
-picks it up and `process_research_callout()`:
+recursively (`VAULT_PATH`), skipping `_triggers/`, `.obsidian/`, `.trash/` and
+iCloud/Obsidian conflict copies (`*(conflicted)*`, `*sync-conflict*`) — picks it
+up and `process_research_callout()`:
 
 1. Captures the **full text of the host note** (callout line stripped) as
    document context.
 2. Replaces the callout with `> [!info] Researching: …` immediately, so the
    next rescan won't double-process it.
-3. Runs the four-phase pipeline at `standard` depth, passing the note context
-   into both discovery and synthesis. Synthesis uses the dedicated
-   `research_callout` prompt, so the agent answers the question *as it applies to
-   that note* (resolving references like "our two options" against the note)
-   rather than researching the literal phrase.
+3. Runs the four-phase pipeline at the callout's chosen depth (default
+   `standard`), passing the note context into both discovery and synthesis.
+   Synthesis uses the dedicated `research_callout` prompt, so the agent answers
+   the question *as it applies to that note* (resolving references like "our two
+   options" against the note) rather than researching the literal phrase.
 4. Replaces the marker in place with a `> [!done]` callout followed by the
    findings — appended inline to the same note, like a review comment, no
    separate note created.
 
-If the process dies mid-research the note is left with the `> [!info]` marker
-(not retried) — a known limitation.
+**The answer is always DeepSeek V4 Pro, never Gemini.** Callout synthesis runs on
+`task="synthesis"`, which is OpenRouter-only (see *LLM routing*). Only the source
+*discovery* step can fall back to Gemini, and it never writes the answer — so an
+inline answer is either the real DeepSeek report or nothing.
+
+**Per-callout depth.** Depth is encoded in the callout *type*, so it stays one-tap
+insertable and still renders as a normal callout (your question is the visible
+title). `_CALLOUT_RE` captures the suffix (`-` or `|` separator both accepted):
+
+| Marker | Depth |
+|--------|-------|
+| `> [!research] q` | standard (default) — ~4-6 sources, single draft |
+| `> [!research-deep] q` | deep — ~8-12 sources, single draft |
+| `> [!research-comprehensive] q` | comprehensive — ~12-20 sources, draft → critique → revise (slow; drops many source clips — heavy for an inline question) |
+
+**Concurrency & recovery.** The watchdog writes the host note from a separate
+process, so several guards keep it from fighting your editing:
+- **Quiet gate.** `find_research_callouts` skips any note modified within
+  `CALLOUT_QUIET_SECS` (45s, < the 60s rescan) — a note you're actively typing in
+  is left alone and picked up once you pause.
+- **Robust write-back.** The final marker swap matches the in-progress line by
+  topic with a tolerant regex (any depth label, any `.`/`…` form), so ellipsis or
+  whitespace drift during the run can't miss it. If the marker was removed/edited
+  away entirely, the `> [!done]` result is **appended** rather than silently
+  dropped — a finished report is never lost.
+- **Crash recovery.** A callout stranded at `> [!info] Researching…` on a note
+  untouched for `STALE_CALLOUT_SECS` (30 min) — a crashed run, or OpenRouter down —
+  is reverted to `> [!research…]` (original depth preserved) by
+  `revert_stale_callouts()` each rescan, so it retries. This is the callout analogue
+  of pending-trigger recovery; the earlier "stuck on `[!info]` forever" limitation
+  is gone.
+
+**Writing a callout easily (Templater).** Rather than typing the brackets, insert
+one with a hotkey. Install the **Templater** community plugin, point its template
+folder at `Templates/`, and use the three templates the system scaffolds:
+`Research Callout.md`, `Research Callout (Deep).md`, `Research Callout
+(Comprehensive).md` — each is a one-liner with `<% tp.file.cursor() %>` so the
+cursor lands right after the marker. Bind each to a hotkey (Templater → *Template
+Hotkeys*, e.g. `Ctrl+Shift+R` for standard) on desktop, and add the same commands
+to Obsidian's mobile toolbar for one-tap insertion on iPhone. You only need the
+standard one to start.
 
 Trigger notes (`_triggers/`) write a standalone `Research/` note with the generic
 `research_synthesis` prompt (not the callout-tailored one). Their **body** — the

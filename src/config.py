@@ -134,6 +134,13 @@ PAPER_CONTENT_LIMIT    = 40000 # max chars sent to clip-analysis for full-text p
 SYNTHESIS_RAW_EXCERPT  = 15000 # max raw chars per source passed to report synthesis
 RESEARCH_CONTEXT_EXCERPT = 6000 # max chars of a prior research report passed as related-work context
 ICLOUD_SETTLE_SECS     = 3     # seconds to wait after file created before processing
+# Inline research callouts live in notes you're actively editing. Skip a callout host
+# note touched within this window (< the rescan interval) so the watchdog never writes
+# a note mid-edit; once you pause for one quiet period it's picked up next rescan.
+CALLOUT_QUIET_SECS     = 120
+# A callout stuck at "> [!info] Researching:…" on a note untouched for this long means
+# its run crashed or OpenRouter was down. It's reverted to "> [!research]" and retried.
+STALE_CALLOUT_SECS     = 1800  # 30 min
 
 # ── Prompt files ───────────────────────────────────────────────────────────────
 PROMPTS_PATH = Path(__file__).parent.parent / "prompts"

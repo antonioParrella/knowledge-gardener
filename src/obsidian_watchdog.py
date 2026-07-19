@@ -28,13 +28,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     VAULT_PATH, INBOX_PATH, TRIGGERS_PATH, RESEARCH_PATH, SOURCES_PATH, ALL_PATHS,
     ICLOUD_SETTLE_SECS, WATCH_RECURSIVE, GEMINI_API_KEY, RESCAN_INTERVAL_SECS,
-    PDF_INBOX_PATH, PDF_ARCHIVE_PATH,
+    PDF_INBOX_PATH, PDF_ARCHIVE_PATH, STALE_CALLOUT_SECS,
 )
 from clipper import process_clipped_note, find_unprocessed_clips
 from researcher import (
     process_research_trigger, find_pending_triggers,
     process_concept_trigger, find_pending_concept_triggers,
-    find_research_callouts, process_research_callout,
+    find_research_callouts, process_research_callout, revert_stale_callouts,
 )
 from notes import read_note
 from pdf_processor import process_pdf, find_unprocessed_pdfs
@@ -313,13 +313,17 @@ def main():
                     except Exception as e:
                         log.error(f"Concept trigger error {path.name}: {e}")
                     time.sleep(3)
+                # Re-arm callouts stranded at "[!info] Researching…" by a crashed or
+                # OpenRouter-down run (also runs on the first post-startup rescan).
+                with PIPELINE_LOCK:
+                    revert_stale_callouts([VAULT_PATH], STALE_CALLOUT_SECS)
                 # Callouts can live in ANY note in the vault — they're answered
                 # in place, like a review comment (see find_research_callouts).
-                for cpath, ctopic in find_research_callouts([VAULT_PATH]):
+                for cpath, ctopic, cdepth in find_research_callouts([VAULT_PATH]):
                     try:
-                        log.info(f"Processing callout: '{ctopic}' in {cpath.name}")
+                        log.info(f"Processing callout ({cdepth}): '{ctopic}' in {cpath.name}")
                         with PIPELINE_LOCK:
-                            process_research_callout(cpath, ctopic)
+                            process_research_callout(cpath, ctopic, cdepth)
                     except Exception as e:
                         log.error(f"Callout error in {cpath.name}: {e}")
                     time.sleep(3)
