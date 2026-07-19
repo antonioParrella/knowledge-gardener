@@ -97,6 +97,99 @@ def normalize_tags(tags) -> list[str]:
     return out
 
 
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _convert_inline_segment(seg: str, escape_currency: bool) -> str:
+    r"""
+    Convert inline math `\( … \)` -> `$ … $` in one text segment (already known
+    to be OUTSIDE code). Deliberately does NOT touch `\[` / `\]`: outside a
+    display-shaped line those are ambiguous with markdown's escaped-literal
+    bracket (`interval \[a, b\]`), so display conversion is handled per line by
+    _convert_line, and mid-prose `\[` is left as the literal it probably is.
+
+    Currency escaping is SCOPED to segments that actually contain a bracket to
+    convert. That is the only situation where we introduce a new math '$' that a
+    currency '$' could collide with; a segment already in correct dollar form
+    (no brackets) is left completely alone, so a legitimately dollar-delimited
+    span that starts with a digit — `$1 - \alpha$` (a confidence level),
+    `$2^n$` — is never corrupted. Order still matters within a converting
+    segment: currency is escaped FIRST, before the brackets become '$', so the
+    freshly-written delimiters are never re-escaped.
+    """
+    if escape_currency and (r"\(" in seg or r"\)" in seg):
+        # Currency signature: '$' immediately followed by a digit ($1, $5,000).
+        seg = re.sub(r"(?<!\\)\$(?=\d)", r"\\$", seg)
+    seg = seg.replace(r"\(", "$").replace(r"\)", "$")
+    return seg
+
+
+def _is_display_line(stripped: str) -> bool:
+    r"""
+    True when a line IS a LaTeX display block, so its `\[` / `\]` are real math
+    delimiters (not escaped literal brackets in prose). Two shapes, both drawn
+    from how the synthesis model actually writes display math:
+      - a bare delimiter alone on its line (`\[` … content … `\]`), or
+      - the whole line wrapped as one block (`\[ E = mc^2 \]`).
+    A `\[…\]` sitting mid-sentence with prose around it is neither, so a literal
+    escaped interval is left untouched.
+    """
+    if stripped in (r"\[", r"\]"):
+        return True
+    return len(stripped) > 3 and stripped.startswith(r"\[") and stripped.endswith(r"\]")
+
+
+def _convert_line(line: str, escape_currency: bool) -> str:
+    """Convert one non-fenced line (may keep a trailing newline)."""
+    nl = "\n" if line.endswith("\n") else ""
+    body = line[:-1] if nl else line
+
+    if _is_display_line(body.strip()):
+        # Pure display math — no inline code or currency to worry about.
+        return body.replace(r"\[", "$$").replace(r"\]", "$$") + nl
+
+    # Otherwise inline-only, code-span aware: even-indexed parts are outside
+    # inline `code`, so `arr\[i\]` / `$PATH` in code is never rewritten.
+    parts = body.split("`")
+    for i in range(0, len(parts), 2):
+        parts[i] = _convert_inline_segment(parts[i], escape_currency)
+    return "`".join(parts) + nl
+
+
+def normalize_math_delimiters(text: str, escape_currency: bool = False) -> str:
+    r"""
+    Convert `\( … \)` / `\[ … \]` math to Obsidian's `$ … $` / `$$ … $$`.
+
+    Obsidian's MathJax only renders the dollar delimiters; models trained on
+    papers habitually emit the backslash-bracket form despite the prompt, so
+    reports render as literal brackets. This is the deterministic backstop.
+
+    Code is left untouched: fenced blocks (``` / ~~~) and inline `code` spans
+    are skipped, so `arr\[i\]`-style content in code never becomes math.
+    Display `\[` / `\]` are converted only on display-shaped lines (see
+    _is_display_line), so an escaped literal interval mid-prose is preserved.
+
+    escape_currency=True rewrites a currency '$' ('$'+digit) to '\$', but ONLY
+    on a line where a bracket is being converted — the only place we introduce a
+    new math '$' for currency to collide with. It neutralises the collision on
+    lines like "bet $1 … lose \(\alpha\)" while leaving a line that is already
+    correct dollar-math untouched, so an existing `$1 - \alpha$` or `$2^n$` is
+    never corrupted. Pass False to skip currency handling entirely.
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in text.splitlines(keepends=True):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        out.append(_convert_line(line, escape_currency))
+    return "".join(out)
+
+
 def today() -> str:
     return time.strftime("%Y-%m-%d")
 

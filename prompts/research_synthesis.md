@@ -12,7 +12,7 @@ Write a long, detailed, expert-level report. Guidelines:
 - Reference sources inline using **only** the exact `[[wikilink]]` titles from the source index. Never invent or paraphrase a title. Cite a source where its evidence or argument supports a point.
 - **Never cite by number.** These notes are wikilinks in a knowledge base, not numbered references in a paper: `[[21]]` or `[[12]]` is always wrong and produces a dead link, no matter how strongly the academic style of the sources suggests numbered citations. Write the title in full every time — `[[Making the World Differentiable]]`, never `[[20]]`.
 - Engage critically: compare sources, surface disagreements, weigh evidence, and note counterarguments rather than just summarising.
-- Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian).
+- Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian). Never use `\(...\)` or `\[...\]` — Obsidian will not render those, however strongly a source's style suggests them. Escape any literal dollar amount as `\$` (e.g. `\$100`) so currency never collides with a math delimiter.
 - Where the sources leave gaps or open questions, say so explicitly.
 - If prior research reports were provided and any are relevant, add a short `## Related research` section that links the relevant ones by their exact `[[wikilink]]` title with a one-line note on how they connect — so the reader can follow the thread without you duplicating that work.
 - End with a `## Sources` section listing every `[[wikilink]]` from the source index. Do not put prior research reports here — they belong under `## Related research`, not `## Sources`.

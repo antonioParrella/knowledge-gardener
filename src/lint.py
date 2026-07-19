@@ -1,4 +1,4 @@
-"""
+r"""
 lint.py — Periodic vault health checker.
 
 Scans the Obsidian vault for common issues without using the Gemini API.
@@ -17,6 +17,7 @@ Checks:
     5. Duplicate [[links]] within a single MOC
     8. Notes with empty body content
     9. _index.md references to MOCs that don't exist
+   10. Unrendered LaTeX math delimiters (\( \) / \[ \]) in Research/Concepts
 """
 
 import re
@@ -31,7 +32,7 @@ from config import (
     VAULT_PATH, INBOX_PATH, RESEARCH_PATH, CONCEPTS_PATH, INDEX_PATH,
     SOURCES_PATH, TRIGGERS_PATH, LINT_REPORT_PATH,
 )
-from notes import read_note, write_note
+from notes import read_note, write_note, normalize_math_delimiters
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]+)?\]\]")
 
@@ -285,6 +286,44 @@ def check_empty_body():
     return issues
 
 
+def check_unrendered_math():
+    """
+    Flag Research/Concepts notes that still carry standard LaTeX math delimiters
+    (`\\( … \\)`, or a display-shaped `\\[ … \\]` line) — Obsidian's MathJax only
+    renders the dollar form, so those show as literal brackets.
+
+    The detector IS the fixer: a note is flagged iff normalize_math_delimiters
+    would change it, so lint and the fix can never disagree, and a note already
+    in correct dollar form (even with currency `$5`, which the scoped escaping
+    leaves alone) is never a false positive. This is the safety net for reports
+    written before the synthesis-time guard, or any bracket that slips past it.
+    """
+    issues = []
+    for fp in _md_files(RESEARCH_PATH, CONCEPTS_PATH):
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        normalized = normalize_math_delimiters(text, escape_currency=True)
+        if normalized == text:
+            continue
+        n_inline = len(re.findall(r"\\[()]", text))
+        n_display = len(re.findall(r"(?m)^\s*\\[\[\]]", text))
+        issues.append({
+            "severity": "warn",
+            "path": fp,
+            "message": (
+                f"Unrendered LaTeX math delimiters "
+                f"(~{n_inline} inline \\(…\\), ~{n_display} display \\[…\\]) "
+                f"— Obsidian will show literal brackets"
+            ),
+            "detail": "Fix: python src/fix_math_delimiters.py --apply  (or lint.py --fix)",
+            "fixable": True,
+            "fix_data": {"normalized": normalized},
+        })
+    return issues
+
+
 def check_stale_index():
     issues = []
     idx_path = INDEX_PATH / "_index.md"
@@ -324,6 +363,7 @@ def run_all():
         "duplicate_moc_entries": check_duplicate_moc_entries(),
         "empty_body":         check_empty_body(),
         "stale_index":        check_stale_index(),
+        "unrendered_math":    check_unrendered_math(),
     }
 
 
@@ -346,6 +386,7 @@ def report(results: dict, quiet: bool = False):
             "duplicate_moc_entries": "Duplicate MOC entries",
             "empty_body":            "Empty body notes",
             "stale_index":           "Stale _index.md references",
+            "unrendered_math":       "Unrendered LaTeX math delimiters (Research/Concepts)",
         }
         for check_name, issues in results.items():
             if not issues:
@@ -440,6 +481,14 @@ def auto_fix(results: dict):
                 fm["note_count"] = len(remaining)
                 write_note(fp, fm, new_body.strip())
                 print(f"[fix] Removed orphan [[{dead_link}]] from {fp.stem}")
+                fixed += 1
+
+            elif check_name == "unrendered_math":
+                fp = issue["path"]
+                # Reuse the already-computed normalized text (identical to what
+                # fix_math_delimiters.py would write) — no re-derivation, no drift.
+                fp.write_text(issue["fix_data"]["normalized"], encoding="utf-8")
+                print(f"[fix] Normalized math delimiters in {fp.stem}")
                 fixed += 1
 
             elif check_name == "duplicate_sources":

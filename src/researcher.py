@@ -21,7 +21,8 @@ from config import (
     MAX_CONCEPTS_PER_REPORT, CALLOUT_QUIET_SECS,
     load_prompt,
 )
-from notes import read_note, write_note, safe_filename, today, normalize_tags
+from notes import (read_note, write_note, safe_filename, today, normalize_tags,
+                   normalize_math_delimiters)
 from llm import llm_simple, llm_tool_loop, parse_json_response
 from web_tools import TOOL_SCHEMA, execute_tool, reset_queue, get_queue
 from academic import extract_paper_text
@@ -574,6 +575,12 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     _, valid_titles = _build_source_block(all_sources)
     valid_titles |= {p["title"] for p in prior_research}
     report = _repair_wikilinks(report, valid_titles)
+
+    # Deterministic math backstop: synthesis habitually emits \( \) / \[ \] despite
+    # the prompt (Obsidian's MathJax only renders $…$ / $$…$$), and a currency $ on
+    # a converted line would mispair with the new math $. Convert delimiters + escape
+    # currency here — after link repair (link-only) and before the completeness gate.
+    report = normalize_math_delimiters(report, escape_currency=True)
 
     # Gate: never write/index a report that was cut off mid-generation. Raising here
     # aborts before the trigger is marked done, so it stays pending and retries (the
@@ -1372,6 +1379,8 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
     # source-free explainer should carry no wikilinks, so there's nothing to fix.
     if valid_titles:
         concept_note = _repair_wikilinks(concept_note, valid_titles)
+    # Same math-delimiter backstop as research reports (see _run_research).
+    concept_note = normalize_math_delimiters(concept_note, escape_currency=True)
     return concept_note
 
 

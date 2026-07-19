@@ -115,6 +115,7 @@ obsidian_system/
     ├── reset_clips.py       ← Standalone script to revert clips to original
     ├── clean_junk_clips.py  ← One-off: purge junk clips (garbled PDFs, bot-walls) + fix MOCs
     ├── consolidate_tags.py  ← One-time backfill: unify drifted tags → canonical vocabulary
+    ├── fix_math_delimiters.py ← One-off backfill: LaTeX \(…\)/\[…\] → Obsidian $…$/$$…$$
     └── lint.py              ← Vault health checker (run periodically)
 ```
 
@@ -246,6 +247,51 @@ a report. Because a fail-over target could truncate too, `_assert_report_complet
 is the final gate: a report still ending mid-sentence is rejected before it is
 written or indexed, and the trigger stays pending to retry. Synthesis is also routed
 OpenRouter-only (`synthesis` task), so reports are never written by Gemini.
+
+### Math rendering
+
+Obsidian's MathJax only renders `$…$` / `$$…$$`; the synthesis model, trained on
+papers, habitually emits standard LaTeX `\( … \)` / `\[ … \]` despite the prompt
+asking for the dollar form — so math-heavy reports render as literal brackets. This
+is the same shape of problem as *Citation integrity*: a prompt instruction alone
+doesn't hold against a strong stylistic prior, so it needs a deterministic backstop.
+
+`notes.normalize_math_delimiters()` is that pass, run in `_run_research` and
+`_run_concept` right after `_repair_wikilinks` (link-only) and before the
+completeness gate, so every research / callout / concept report is normalised
+before it is written. It converts `\(…\)` → `$…$` and — only on a **display-shaped
+line** (the delimiter alone on its line, or the whole line wrapped, `_is_display_line`)
+— `\[…\]` → `$$…$$`. Display conversion is line-anchored because `\[` is ambiguous:
+in LaTeX it opens display math, in markdown it's an *escaped literal bracket*
+(`interval \[a, b\]`), and only a display-shaped line is unambiguously the former.
+Fenced (``` / ~~~) and inline `` `code` `` spans are skipped, so `arr\[i\]` in code
+is never touched.
+
+The subtle part is **currency**. A `$5` next to freshly-written math `$…$` makes
+MathJax pair the two and swallow the prose between them (the real trigger: a
+Conformal report with "bet $1 … lose \(\alpha\)" on one line). So the pass also
+escapes a currency `$` (signature: `$` immediately followed by a digit) to `\$` —
+but **only on a line where it is also converting a bracket**, i.e. the one place it
+introduces a new `$` to collide with. A line already in correct dollar form (no
+brackets) is left completely untouched, so an existing `$1 - \alpha$` (a confidence
+level) or `$2^n$` is never corrupted — escaping where there's nothing to collide with
+could only do harm. Escaping runs *before* the bracket→dollar conversion on that
+line, so the delimiters it just wrote are never re-escaped.
+
+The prompt side is hardened too (belt to the deterministic suspenders):
+`research_synthesis`, `research_callout` and `concept_synthesis` explicitly ban
+`\(…\)` / `\[…\]` and require escaped `\$` amounts, and the Research Trigger template
+carries a standing formatting acceptance-criterion. `lint.py`'s `unrendered_math`
+check (and `--fix`) flags any Research/Concepts note the normaliser would still
+change — the detector *is* the fixer, so lint and the fix can't disagree, and a
+correct dollar-only note (even with currency) is never a false positive.
+`fix_math_delimiters.py` is the reviewable one-off backfill (dry-run, then `--apply`)
+for reports written before the guard existed.
+
+The one residual: a single line that mixes *both* `$…$` and `\(…\)` styles where the
+dollar-span starts with a digit — its opening `$` gets escaped. It needs the model to
+use two delimiter conventions on one line, which the prompt ban pushes against; the
+`lint` check surfaces whatever slips through.
 
 ### Inline Research Callouts
 
@@ -496,8 +542,10 @@ Scans the vault for common issues without using the Gemini API. Detects:
 5. **Duplicate MOC entries** — Same `[[link]]` listed twice in one MOC
 8. **Empty body notes** — Notes with no content after frontmatter
 9. **Stale _index.md references** — Index points to MOCs that don't exist
+10. **Unrendered LaTeX math** — Research/Concepts notes with `\(…\)` / display `\[…\]`
+    that Obsidian won't render (see *Math rendering*)
 
-`--fix` automatically resolves checks 1, 3, 4, 5, and 9:
+`--fix` automatically resolves checks 1, 3, 4, 5, 9, and 10:
 | Check | Fix action |
 |-------|-----------|
 | Duplicate sources | Deletes the lesser copy, then strips its `[[link]]` from any MOC (via `reset_clips` surgery) so deletion doesn't leave an orphan. The keeper is chosen by `_clip_quality`: **full_text over abstract-only, processed over unprocessed, larger body as tiebreaker** — not file age. The old "delete newest" rule dropped the good copy of a research duplicate (abstract stub written first, full text indexed later). |
@@ -505,6 +553,7 @@ Scans the vault for common issues without using the Gemini API. Detects:
 | MOC note_count | Updates frontmatter to match actual count (counts `## Notes` **and** `## Concepts`) |
 | Stale _index.md | Removes dead MOC references |
 | Duplicate MOC entries | Deduplicates, updates `note_count` |
+| Unrendered LaTeX math | Rewrites delimiters to `$…$` / `$$…$$` via `normalize_math_delimiters` (the detector is the fixer — reuses the exact normalised text) |
 
 MOC checks count entries under both `## Notes` and `## Concepts` (`_moc_entry_links`),
 since `indexer` increments `note_count` for concept explainers too; counting only

@@ -12,7 +12,7 @@ Write the explainer. Guidelines:
 - Be as long as the concept genuinely needs and no longer. A foundational concept may only need a few tight paragraphs; don't pad.
 - **Citations are optional and often unnecessary.** If a source index was provided and a source supports a specific point, you may reference it inline using **only** its exact `[[wikilink]]` title. If no sources were provided, write from established knowledge and include no citations and no `## Sources` section — do not invent links.
 - **Never cite by number.** These are wikilinks in a knowledge base, not numbered references in a paper: `[[21]]` or `[[12]]` is always wrong and produces a dead link, no matter how strongly any source's academic style suggests numbered citations. Write the title in full every time.
-- Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian).
+- Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian). Never use `\(...\)` or `\[...\]` — Obsidian will not render those, however strongly a source's style suggests them. Escape any literal dollar amount as `\$` (e.g. `\$100`) so currency never collides with a math delimiter.
 - Do not write an `## Appears in` section — that backlink is added automatically. Only add a `## Sources` section if you actually cited sources from the index.
 
 Start the note with a level-1 heading of the concept's name (`# Concept Name`). Output only the note in Markdown.

@@ -13,7 +13,7 @@ Write a focused, expert answer to the question, grounded in the note's context. 
 - Reference sources inline using **only** the exact `[[wikilink]]` titles from the source index. Never invent or paraphrase a title. Cite a source where its evidence supports a point.
 - **Never cite by number.** These notes are wikilinks in a knowledge base, not numbered references in a paper: `[[21]]` or `[[12]]` is always wrong and produces a dead link, no matter how strongly the academic style of the sources suggests numbered citations. Write the title in full every time.
 - Engage critically: compare sources, weigh evidence, and note disagreements or caveats relevant to the user's situation.
-- Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian).
+- Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian). Never use `\(...\)` or `\[...\]` — Obsidian will not render those, however strongly a source's style suggests them. Escape any literal dollar amount as `\$` (e.g. `\$100`) so currency never collides with a math delimiter.
 - Where the sources or the note leave gaps or open questions, say so explicitly.
 - If a prior research report is relevant, cross-link to it inline by its exact `[[wikilink]]` title so the reader can follow the thread instead of repeating it.
 - End with a `## Sources` section listing every source `[[wikilink]]` you cited (prior research reports do not go here).
