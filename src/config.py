@@ -1,6 +1,6 @@
 """
 config.py — Central configuration for the Obsidian Auto-Research System.
-Edit VAULT_PATH to point at your iCloud vault before running.
+Edit VAULT_PATH to point at your vault before running.
 """
 
 import os
@@ -21,8 +21,11 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 # ── Vault paths ───────────────────────────────────────────────────────────────
-# Update this to your actual iCloud vault location
-VAULT_PATH   = Path(r"C:\Users\parre\iCloudDrive\iCloud~md~obsidian\Knowledge Garden")
+# Vault lives on local disk and is synced by Obsidian Sync — NOT iCloud. iCloud
+# conflicted every write to .obsidian/ (1,200+ "workspace N.json" copies, and a
+# canonical community-plugins.json that never survived), which disabled plugins
+# and made the phone crawl. Keep the vault off any file-level sync service.
+VAULT_PATH   = Path(r"C:\Users\parre\Obsidian\Knowledge Garden")
 
 INBOX_PATH    = VAULT_PATH / "Clippings"       # Web Clipper saves here
 RESEARCH_PATH = VAULT_PATH / "Research"   # Agent research summaries

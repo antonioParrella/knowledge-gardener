@@ -37,7 +37,7 @@ Total cost: **$0** (Tavily and Gemini both have free tiers; arXiv + OpenAlex nee
 
 | Component       | Choice                          | Why                                      |
 |-----------------|---------------------------------|------------------------------------------|
-| Sync            | iCloud Drive                    | Native on iPhone, works on Surface       |
+| Sync            | Obsidian Sync (vault on local disk) | Understands Obsidian's write patterns; iCloud shredded `.obsidian/` (see *Sync*) |
 | AI              | Gemini Flash (free) + OpenRouter | Per-task routing; research on DeepSeek V4 Pro (max reasoning) via OpenRouter |
 | Trigger         | Python watchdog on Surface      | Monitors vault for new notes             |
 | Academic search | arXiv + OpenAlex (no key)       | Real papers with full-text PDFs          |
@@ -131,7 +131,7 @@ obsidian_system/
       clipped: true
       processed: false
       source: "https://..."
-3. iCloud syncs to Surface
+3. Obsidian Sync brings it to the Surface
 4. obsidian_watchdog.py detects new file in Clippings/
 5. clipper.py checks for duplicate source URLs (skips if already in vault)
 6. clipper.py reads the content
@@ -151,7 +151,7 @@ obsidian_system/
       depth: comprehensive   # standard | deep | comprehensive
       urls:                  # optional seed URLs
         - https://...
-2. iCloud syncs to Surface; obsidian_watchdog.py picks it up via the create
+2. Obsidian Sync brings it to the Surface; obsidian_watchdog.py picks it up via the create
    event, the 60s periodic rescan, or the startup backlog drain — a trigger
    stays `research: true` until a run completes, so missed events and
    crashed runs are retried automatically. All pipeline work is serialized
@@ -772,14 +772,38 @@ after the agent has processed the note so it never gets processed twice.
 
 ## Setup Steps
 
-### 1. iCloud on Surface
-- Install iCloud for Windows from the Microsoft Store
-- Sign in with your Apple ID
-- Enable iCloud Drive
-- Move your Obsidian vault into the iCloud Drive folder:
-  `C:\Users\You\iCloud Drive\Obsidian\MyVault`
-- Reopen Obsidian pointing at the new vault path
-- On iPhone: install Obsidian → open vault → select iCloud vault
+### 1. Sync
+
+**The vault lives on local disk and is synced by Obsidian Sync. Do not put it on
+iCloud Drive, OneDrive, Dropbox, or any other file-level sync service.**
+
+- Keep the vault somewhere local, e.g. `C:\Users\You\Obsidian\MyVault`
+- Obsidian → Settings → Sync → create a remote vault and upload from the Surface
+- On iPhone: create a **new empty vault**, then connect it to that remote
+
+Why this matters — the vault was originally on iCloud Drive, and iCloud
+conflict-copies any file two devices write concurrently. Obsidian rewrites
+`workspace.json` on nearly every pane change and `community-plugins.json` on every
+plugin toggle, so those files were being renamed away constantly. The end state:
+**1,239 conflict copies** inside `.obsidian/` (1,225 of them `workspace N.json`),
+and **no canonical `workspace.json` or `community-plugins.json` at all**. With the
+enabled-plugins file permanently destroyed, every community plugin silently
+reverted to disabled on each launch — Templater could never stay on — and the
+constant sync churn made the iPhone crawl.
+
+This is not only a two-device race: with Obsidian fully closed on both devices,
+a locally written `community-plugins.json` was still renamed to
+`community-plugins 10.json` within about a second.
+
+When syncing settings, **"Active community plugin list" and "Installed community
+plugins" must both be enabled** in Sync settings. Either one alone leaves the
+phone knowing a plugin should be on but not having it installed.
+
+Two consequences for this system:
+- Obsidian Sync only runs while Obsidian is **open**, so Obsidian must stay
+  running on the Surface for phone-written triggers to reach the watchdog.
+- `PDF_INBOX_PATH` is deliberately still on iCloud — it is outside the vault and
+  is a low-churn drop folder, so none of the above applies to it.
 
 ### 2. Gemini API Key
 - Go to https://aistudio.google.com
@@ -814,7 +838,7 @@ python src/obsidian_watchdog.py
 You should see:
 ```
 Obsidian Auto-Research System
-Vault: C:\Users\You\iCloud Drive\Obsidian\MyVault
+Vault: C:\Users\You\Obsidian\MyVault
 Watching for:
   Clips    → Clippings/
   Research → _triggers/
@@ -867,7 +891,7 @@ Month 2
 | Gemini requests      | 1,500/day      | research is call-heavy: relevance + discovery loop + N source analyses + synthesis (a few comprehensive runs can exhaust the free daily quota) |
 | arXiv / OpenAlex     | Unlimited      | Free, no key       |
 | Tavily searches      | ~1,000/month   | Free tier          |
-| iCloud sync          | 5 GB free      | Well within limits |
+| Obsidian Sync        | 1 GB (Standard) | ~32 MB — well within limits |
 
 ### LLM routing
 
@@ -911,8 +935,11 @@ Three things that aren't obvious when debugging a run:
   captures the whole pipeline's stdout — the `[research]` / `[llm]` / provider
   trace, finish reasons, fall-throughs — not just the watchdog's own events, and is
   flushed per line so it survives a mid-run kill. Rotates at 10 MB × 5.
-- **The vault is on iCloud** (`config.VAULT_PATH`), which is slow: a recursive
-  grep/glob over the whole vault can time out — scope searches to one subfolder.
+- **The vault is on local disk** (`config.VAULT_PATH`), synced by Obsidian Sync.
+  It used to live on iCloud Drive, which was slow enough that a recursive
+  grep/glob over the whole vault could time out — that is no longer true, so a
+  slow scan now means something is actually wrong rather than being expected.
+  See *Sync* below for why it must not go back on a file-level sync service.
 - **Truncated report ≠ manual stop.** An interrupted/crashed run writes no report
   and leaves the trigger `research: true` (retried next rescan). A report that
   *exists* but ends mid-sentence with its trigger `research: done` is a silent

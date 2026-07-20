@@ -10,7 +10,7 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 
 ## Stack
 
-- **Sync**: iCloud Drive (native on iPhone, works on Surface)
+- **Sync**: Obsidian Sync, vault on local disk (never a file-level sync service — see `AGENTS.md` § Setup Steps → Sync)
 - **AI**: per-task routing (`src/llm.py`) — free Gemini Flash for clips/MOCs (falling back to DeepSeek V4 Flash via OpenRouter when the daily quota is hit); research on DeepSeek V4 Pro at max reasoning via OpenRouter (falling back to free Gemini Flash)
 - **Trigger**: Python watchdog on Surface
 - **Academic search**: arXiv + OpenAlex (no key needed); full-text PDFs via PyMuPDF
@@ -19,7 +19,7 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 
 ## Setup
 
-1. Install iCloud for Windows and move your Obsidian vault to iCloud Drive
+1. Keep your Obsidian vault on local disk and sync it with Obsidian Sync (not iCloud/OneDrive/Dropbox)
 2. Get a Gemini API key from https://aistudio.google.com and set `GEMINI_API_KEY`
 3. Get an OpenRouter key from https://openrouter.ai/keys and set `OPENROUTER_API_KEY` (optional — without it everything runs on Gemini and research quality reverts to free Gemini Flash)
 4. Get a free Tavily key from https://tavily.com and set `TAVILY_API_KEY` (optional — without it, research uses the academic sources only)
