@@ -4,6 +4,7 @@ You are curating a personal knowledge base. You are given a finished research re
 {report}
 
 # Concepts already explained in the knowledge base
+Each line is an existing concept note, formatted `- Name — one-line gloss of what it covers`. Use the gloss, not just the name, to judge whether one of your picks is the same concept: reuse the existing note when the meaning matches (even if you'd have named it differently). If one of your picks shares a name with an existing concept but means something *different* (e.g. "Attention" in machine learning vs psychology), it is a genuinely new concept — and you must give your `term` a short distinguishing qualifier (e.g. `"Attention (machine learning)"`) so it gets its own note instead of collapsing onto the existing one.
 {existing_concepts}
 
 Select the concepts worth turning into their own explainer notes. Choose well — this is a curation task, not extraction of every term.

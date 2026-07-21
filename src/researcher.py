@@ -1076,14 +1076,38 @@ def _match_key(term: str) -> str:
     return _MATCH_KEY_RE.sub(" ", term.lower()).strip()
 
 
-def _existing_concept_terms() -> set[str]:
-    """Display terms of concepts already explained (Concepts/Concept - <term>.md)."""
-    terms = set()
+def _concept_gloss(body: str) -> str:
+    """First prose paragraph of a concept note, collapsed to one line — a short gloss
+    of what the concept actually covers. Feeding this (not just the bare name) to the
+    extractor lets it tell same-named-but-different concepts apart ('Attention' in ML
+    vs psychology) and spot synonyms it would miss from the title alone."""
+    para: list[str] = []
+    for line in body.split("\n"):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            if para:  # blank/heading after we've started = end of first paragraph
+                break
+            continue
+        para.append(s)
+    return one_line(" ".join(para))
+
+
+def _existing_concept_summaries() -> dict[str, str]:
+    """Map each already-explained concept's display term (Concepts/Concept - <term>.md)
+    to a one-line gloss from its note. The keys are the terms used for dedup snapping;
+    the values disambiguate them for the extractor prompt (see _concept_gloss)."""
+    out: dict[str, str] = {}
     prefix = "Concept - "
-    for p in CONCEPTS_PATH.glob("Concept - *.md"):
-        if p.stem.startswith(prefix):
-            terms.add(p.stem[len(prefix):])
-    return terms
+    for p in sorted(CONCEPTS_PATH.glob("Concept - *.md")):
+        if not p.stem.startswith(prefix):
+            continue
+        term = p.stem[len(prefix):]
+        try:
+            _, body = read_note(p)
+        except Exception:
+            body = ""
+        out[term] = _concept_gloss(body)
+    return out
 
 
 def _pending_concept_terms() -> set[str]:
@@ -1236,8 +1260,9 @@ def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
     Best-effort throughout: bad/empty model output or a write hiccup leaves the
     report as-is — concepts are additive and must never block a research run.
     """
-    existing = _existing_concept_terms()          # display terms of built concepts
-    pending = _pending_concept_terms()            # display terms of queued-but-unbuilt
+    existing_glosses = _existing_concept_summaries()  # built concept term → one-line gloss
+    existing = set(existing_glosses)                   # display terms of built concepts
+    pending = _pending_concept_terms()                 # display terms of queued-but-unbuilt
 
     # Canonical title for every concept already known (built or already queued),
     # keyed aggressively (casing/punctuation-insensitive) so a variant the model
@@ -1247,12 +1272,20 @@ def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
         canonical_by_match[_match_key(t)] = t
     pending_keys = {_concept_key(t) for t in pending}
 
+    # List existing concepts to the extractor WITH a one-line gloss, so it reuses the
+    # note when it means the same thing and doesn't collide two distinct namesakes —
+    # a match/conflict judgment the bare name can't support (see _concept_gloss).
+    def _fmt(t: str) -> str:
+        g = existing_glosses.get(t, "")
+        return f"- {t} — {g}" if g else f"- {t}"
+    existing_block = "\n".join(_fmt(t) for t in sorted(existing)) or "(none yet)"
+
     raw = llm_simple(
         task="moc",
         prompt=load_prompt(
             "concept_extract",
             report=report[:SYNTHESIS_RAW_EXCERPT],
-            existing_concepts="\n".join(f"- {t}" for t in sorted(existing)) or "(none yet)",
+            existing_concepts=existing_block,
             max_concepts=str(MAX_CONCEPTS_PER_REPORT),
         ),
     )

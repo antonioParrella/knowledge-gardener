@@ -383,8 +383,13 @@ automatically** from finished research reports; you don't author them.
    - Reads the finished report and picks the foundational, *reusable* concepts it
      leans on but doesn't build from scratch — capped at MAX_CONCEPTS_PER_REPORT
      (8), fewer is better. It rejects the report's own thesis, one-off jargon, and
-     paper-specific proper nouns, and is shown the existing concept names so it
-     reuses them. Returns {term, mention, why, context_excerpt} per pick.
+     paper-specific proper nouns, and is shown the existing concepts **each with a
+     one-line gloss** (`_existing_concept_summaries` → the first paragraph of each
+     note) — not just their names — so it can judge a *meaning* match rather than a
+     name match: reuse the note when the sense is the same (even under a different
+     name), and disambiguate its `term` (e.g. `Attention (machine learning)`) when a
+     name collides with an existing concept of a different sense. Returns
+     {term, mention, why, context_excerpt} per pick.
    - Links each concept INTO the report body deterministically
      (_link_concepts_inline): the first clean occurrence of `mention` is wrapped as
      `[[Concept - Term|mention]]` — the report keeps its own wording as the alias,
@@ -425,7 +430,12 @@ is **snapped onto the canonical title** of an existing/pending concept via
 minting a dead link and a duplicate; and process_concept_trigger re-checks at run
 time, adding a backlink instead of regenerating. Mechanical drift (casing, spacing,
 punctuation) is caught deterministically; a genuine *synonym* — different words for
-the same idea — still relies on the model reusing the name it is shown.
+the same idea — relies on the model, but it now decides from each existing concept's
+one-line gloss rather than its bare name (`_existing_concept_summaries` feeds the
+`concept_extract` prompt), so it can recognise a same-meaning note under a different
+name and, conversely, keep two different concepts that share a name apart by
+disambiguating the new one's `term`. The residual is a true synonym the model still
+fails to connect from the gloss.
 
 **Cost & scope.** Concept generation deliberately uses the best model (`synthesis`,
 OpenRouter-only, no free-tier fallback) because the explainer's quality is what
