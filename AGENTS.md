@@ -585,6 +585,45 @@ re-ingested by the watchdog's backlog scan as a second clip for the same source.
 
 ---
 
+## Testing
+
+A lightweight pytest safety net lives in `tests/` (repo root, not under `src/`),
+scoped to the logic that actually breaks rather than coverage for its own sake.
+`pytest.ini` sets `testpaths = tests` and, crucially, `addopts = -m "not llm"` so a
+bare `pytest` never spends money. Install the test-only deps with
+`pip install -r requirements-dev.txt` (just `pytest>=8`).
+
+```
+pytest                       # Tiers 1 + 2 (Tier 3 auto-deselected)
+pytest tests/unit            # just Tier 1
+pytest -m llm                # Tier 3 only — real LLM, costs money, needs API keys
+```
+
+Three tiers:
+
+| Tier | Folder | What | In default run? |
+|------|--------|------|-----------------|
+| 1 | `tests/unit/` | Pure `str → str` logic: math-delimiter normalisation, tag hygiene, wikilink repair, report-completeness gate, note naming, depth parsing, concept linking, MOC helpers | ✅ free, ~0.5s |
+| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault` fixture): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked** | ✅ free, fast |
+| 3 | `tests/llm/` | **Real LLM calls** — judgments that can't be mocked: the `usable` gate, citation repair, MOC granularity | ❌ opt-in (`-m llm`), a few cents |
+
+Two fixtures carry the setup. `tests/conftest.py` puts `src/` on `sys.path` (the
+modules import each other by bare name) and provides `tmp_vault`: a real on-disk
+vault whose config path constants (`INBOX_PATH`, `INDEX_PATH`, …) are monkeypatched
+into **every module that imported them** — rebinding only `config.INBOX_PATH`
+wouldn't reach the copy `clipper`/`reset_clips`/`indexer` already hold. `tests/llm/`
+adds `require_openrouter` / `require_gemini_or_openrouter`, which **skip cleanly**
+when the key is absent (keys come from `.env` via `config.py`), so `pytest -m llm`
+on a keyless machine reports skips, not errors.
+
+**Reach for Tier 3 after touching a prompt or model route** — the changes unit
+tests can't catch: edit `clip_analysis.md`/`clip_system.md` → `test_usable_gate.py`;
+edit `research_repair_links.md` or synthesis routing → `test_citation_integrity.py`;
+edit the MOC-assignment prompt → `test_moc_granularity.py`. Tier-3 fixtures
+(bot-wall / article text) live in `tests/llm/fixtures/`.
+
+---
+
 ## MOC Format & Granularity
 
 MOCs are created and named entirely by the agent (`assign_to_moc()` in
@@ -836,6 +875,8 @@ Two consequences for this system:
 pip install -r requirements.txt
 ```
 (`google-genai`, `openai`, `watchdog`, `PyYAML`, `requests`, `python-dotenv`, `pymupdf`, `feedparser`)
+
+To run the test suite, also `pip install -r requirements-dev.txt` (`pytest>=8`) — see *Testing*.
 
 ### 4. Configure the Script
 Edit `src/config.py` — update `VAULT_PATH` to match your actual vault location.

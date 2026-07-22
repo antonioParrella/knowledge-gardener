@@ -1,0 +1,26 @@
+Diffusion Models: A Practical Introduction
+
+Diffusion models are a class of generative models that learn to produce data by
+reversing a gradual noising process. During training, Gaussian noise is added to
+a data point over many steps until it becomes pure noise. A neural network is
+then trained to predict and remove that noise one step at a time. At generation
+time, the model starts from random noise and iteratively denoises it into a
+coherent sample.
+
+The forward process is fixed and requires no learning: at each timestep t, a
+small amount of noise is added according to a variance schedule. The reverse
+process is where learning happens. The network is typically a U-Net that takes a
+noisy sample and the timestep as input and predicts the noise component. The
+training objective reduces to a simple mean-squared error between the predicted
+and actual noise.
+
+Compared to GANs, diffusion models are more stable to train and cover the data
+distribution more faithfully, at the cost of slower sampling because generation
+requires many sequential denoising steps. Recent work on latent diffusion moves
+the process into a compressed latent space, dramatically reducing compute while
+preserving sample quality, which is the approach behind several widely used
+text-to-image systems.
+
+Key takeaways: diffusion models trade sampling speed for training stability and
+mode coverage; the core mechanism is learned iterative denoising; and latent-space
+variants make the approach practical at scale.
