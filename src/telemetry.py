@@ -289,9 +289,27 @@ def _notify_run(record: dict) -> None:
         pass
 
 
+def _is_nested() -> bool:
+    """True when the innermost run on this thread's stack is a nested one."""
+    stack = _stack()
+    return bool(stack) and stack[-1] is None
+
+
 def phase(name: str, detail: str = "", progress: tuple[int, int] | None = None) -> None:
-    """Advance the current run to a named phase (see PHASES for the known order)."""
+    """
+    Advance the current run to a named phase (see PHASES for the known order).
+
+    A phase() call made from INSIDE a nested run belongs to the inner pipeline,
+    not the outer one — the clip pipeline's "analysing" is not a phase of the
+    research run that invoked it. Writing it through would knock the outer run's
+    stepper onto a phase it doesn't have and clear its source-by-source progress,
+    which is the whole point of the display during phase ③. So a nested phase
+    only refines the detail line.
+    """
     try:
+        if _is_nested():
+            set_detail(f"{name}: {detail}" if detail else name)
+            return
         with _lock:
             record = _state.get("current")
             if not record:

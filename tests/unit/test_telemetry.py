@@ -48,6 +48,26 @@ def test_nested_run_annotates_rather_than_replaces():
     assert len(telemetry.snapshot()["recent"]) == 1        # one run, not two
 
 
+def test_nested_phase_calls_do_not_clobber_the_outer_stepper():
+    """
+    Regression: phase ③ runs the clip pipeline per source, and the clip's own
+    telemetry.phase("analysing") was writing straight through to the research
+    run — knocking its stepper onto a phase it doesn't have and clearing the
+    source-by-source progress, exactly when the display matters most.
+    """
+    with telemetry.run("research", "Diffusion models"):
+        telemetry.phase("sources", detail="Paper A", progress=(3, 11))
+        with telemetry.run("clip", "Paper A"):
+            telemetry.phase("analysing")               # inner pipeline's phase
+            current = telemetry.current_run()
+            assert current["phase"] == "sources"       # outer stepper unmoved
+            assert current["progress"] == {"done": 3, "total": 11}
+            assert "analysing" in current["detail"]    # still visible, as detail
+
+        assert telemetry.current_run()["phase"] == "sources"
+        assert telemetry.current_run()["progress"] == {"done": 3, "total": 11}
+
+
 def test_phase_and_progress_are_exposed():
     with telemetry.run("research", "Topic"):
         telemetry.phase("sources", detail="Paper A", progress=(2, 9))
