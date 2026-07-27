@@ -13,6 +13,7 @@ import re
 
 from config import CLIP_CONTENT_LIMIT, load_prompt
 from llm import llm_simple
+import telemetry
 
 
 # ── Prompt building ──────────────────────────────────────────────────────────────
@@ -111,17 +112,20 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
 
     # task="synthesis" routes to OpenRouter ONLY (never Gemini) — see config.ROUTING.
     synthesis_system = load_prompt(system_name)
+    telemetry.set_detail("drafting")
     draft = llm_simple(prompt=base, system=synthesis_system, task="synthesis")
 
     if depth != "comprehensive":
         return draft
 
     print("[research] Comprehensive depth — running critique + revise pass")
+    telemetry.set_detail("critiquing")
     critique = llm_simple(
         prompt=f"{base}\n\n# Draft report\n{draft}",
         system=load_prompt("research_critique"),
         task="synthesis",
     )
+    telemetry.set_detail("revising")
     revised = llm_simple(
         task="synthesis",
         prompt=(

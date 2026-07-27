@@ -19,6 +19,7 @@ from notes import read_note, write_note, safe_filename, today, normalize_math_de
 from llm import llm_simple, llm_tool_loop, parse_json_response
 from web_tools import TOOL_SCHEMA, execute_tool, reset_queue, get_queue
 from indexer import index_note, find_relevant_clippings, one_line
+import telemetry
 
 from .sources import _process_source
 from .synthesis import _build_source_block, _repair_wikilinks, _WIKILINK_RE
@@ -333,6 +334,7 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
     reset_queue()
 
     # Existing clippings can seed the explainer (reused, never re-fetched).
+    telemetry.phase("prior-knowledge")
     existing = find_relevant_clippings(term)
     if existing:
         print(f"[concept] Found {len(existing)} relevant existing clipping(s).")
@@ -348,6 +350,7 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
         "Queue sources ONLY if you genuinely need them to explain this concept "
         "accurately. For a well-settled concept, queue nothing and confirm you're done."
     )
+    telemetry.phase("discovery")
     llm_tool_loop(
         prompt=discovery_prompt,
         system=load_prompt("concept_system"),
@@ -356,14 +359,19 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
         task="research",
     )
 
+    queue = get_queue()
+    telemetry.phase("sources", progress=(0, len(queue)))
     newly: list[dict] = []
-    for entry in get_queue():
+    for i, entry in enumerate(queue, start=1):
+        telemetry.set_detail(entry.get("title") or entry.get("url", ""),
+                             progress=(i, len(queue)))
         result = _process_source(entry)
         if result:
             newly.append(result)
     if newly:
         print(f"[concept] Processed {len(newly)} new source(s) into the knowledge base.")
 
+    telemetry.phase("synthesis")
     all_sources = existing + newly
     source_block, valid_titles = _build_source_block(all_sources)
 
@@ -436,38 +444,41 @@ def process_concept_trigger(path: Path):
     context = body.strip()
     concept_path = _concept_path(term)
 
-    # Run-time dedup: if the concept already exists, don't regenerate — just add this
-    # report as a backlink and finish.
-    if concept_path.exists():
-        print(f"[concept] Already exists, backlinking only: {term}")
-        _append_backlink(concept_path, source_title)
-    else:
-        print(f"[concept] Generating: '{term}'")
-        concept_note = _run_concept(term, context, source_title)
-        if not concept_note or len(concept_note.strip()) < 100:
-            # Leave the trigger pending so the next rescan retries (any queued
-            # sources are already vaulted and will be reused).
-            print(f"[concept] Empty/failed synthesis for '{term}'; leaving trigger pending")
-            return
+    with telemetry.run("concept", term, meta={"source": source_title}):
+        # Run-time dedup: if the concept already exists, don't regenerate — just add this
+        # report as a backlink and finish.
+        if concept_path.exists():
+            print(f"[concept] Already exists, backlinking only: {term}")
+            telemetry.set_detail("already exists — backlinking only")
+            _append_backlink(concept_path, source_title)
+        else:
+            print(f"[concept] Generating: '{term}'")
+            concept_note = _run_concept(term, context, source_title)
+            if not concept_note or len(concept_note.strip()) < 100:
+                # Leave the trigger pending so the next rescan retries (any queued
+                # sources are already vaulted and will be reused).
+                print(f"[concept] Empty/failed synthesis for '{term}'; leaving trigger pending")
+                return
 
-        note_body = concept_note.rstrip()
-        if source_title:
-            note_body += f"\n\n{_APPEARS_IN_HEADING}\n- [[{source_title}]]\n"
-        write_note(concept_path, {"concept_note": True, "term": term, "date": today()}, note_body)
-        print(f"[concept] Written: {concept_path.name}")
+            note_body = concept_note.rstrip()
+            if source_title:
+                note_body += f"\n\n{_APPEARS_IN_HEADING}\n- [[{source_title}]]\n"
+            write_note(concept_path, {"concept_note": True, "term": term, "date": today()}, note_body)
+            print(f"[concept] Written: {concept_path.name}")
 
-        # Index into a MOC under the ## Concepts subsection (cross-list).
-        tags, summary = _index_entry(term, concept_note)
-        index_note(
-            note_title=concept_path.stem,
-            note_path=concept_path,
-            summary=summary,
-            tags=tags,
-            analysis=concept_note,
-            section="Concepts",
-        )
+            # Index into a MOC under the ## Concepts subsection (cross-list).
+            telemetry.phase("indexing")
+            tags, summary = _index_entry(term, concept_note)
+            index_note(
+                note_title=concept_path.stem,
+                note_path=concept_path,
+                summary=summary,
+                tags=tags,
+                analysis=concept_note,
+                section="Concepts",
+            )
 
-    fm["concept"] = "done"
-    fm["completed"] = today()
-    write_note(path, fm, f"Concept generated. See [[{concept_path.stem}]].")
-    print(f"[concept] Done: '{term}'")
+        fm["concept"] = "done"
+        fm["completed"] = today()
+        write_note(path, fm, f"Concept generated. See [[{concept_path.stem}]].")
+        print(f"[concept] Done: '{term}'")

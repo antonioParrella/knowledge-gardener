@@ -16,6 +16,7 @@ from config import CLIP_CONTENT_LIMIT, VAULT_PATH, INBOX_PATH, SOURCES_PATH, loa
 from notes import read_note, write_note, safe_filename, safe_rename, today, normalize_tags
 from llm import llm_simple, parse_json_response
 from indexer import index_note, format_tag_vocabulary
+import telemetry
 
 
 def find_existing_source(source_url: str, exclude: Path | None = None) -> Path | None:
@@ -123,6 +124,17 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
 
     print(f"[clip] Processing: {path.name}")
 
+    # A clip run nested inside a research run (phase ③ turning a queued source into
+    # a clipping) doesn't replace the research run on the dashboard — telemetry.run
+    # only annotates it. Standalone clips get their own run.
+    with telemetry.run("clip", path.stem):
+        return _analyse_clip(path, fm, body, source_url, content_limit)
+
+
+def _analyse_clip(path: Path, fm: dict, body: str, source_url: str,
+                  content_limit: int) -> Path | None:
+    """Analyse, rename, index, and rewrite one clip. See process_clipped_note."""
+    telemetry.phase("analysing")
     content = body[:content_limit]
 
     system_prompt = load_prompt("clip_system")
@@ -170,6 +182,7 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
 
     summary_body = f"{analysis}\n\n---\n\n## Original Content\n\n{body}"
 
+    telemetry.phase("indexing", detail=path.stem)
     index_note(
         note_title=path.stem,
         note_path=path,

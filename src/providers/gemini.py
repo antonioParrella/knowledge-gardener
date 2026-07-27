@@ -13,6 +13,7 @@ from google.genai import Client
 from google.genai import types
 
 from config import GEMINI_API_KEY, GEMINI_THINKING_LEVEL
+from telemetry import push_usage
 from .base import Provider, QuotaExhausted, ProviderError, safe_print
 
 client = Client(api_key=GEMINI_API_KEY)
@@ -42,6 +43,25 @@ def _classify(err: Exception):
 # as if complete. Raising ProviderError lets the router fall through / the run fail.
 _TRUNCATED = "MAX_TOKENS"
 _BLOCKED = {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"}
+
+
+def _record_usage(response, model: str) -> None:
+    """
+    Report a completed call to telemetry (never raises).
+
+    Cost is always 0.0: these models run on the free tier. What actually
+    constrains us is the *request* count against the 1,500/day cap, so the
+    dashboard tracks calls, and tokens for context.
+    """
+    try:
+        meta = getattr(response, "usage_metadata", None)
+        push_usage(
+            "gemini", model, cost=0.0,
+            prompt_tokens=getattr(meta, "prompt_token_count", 0) or 0,
+            completion_tokens=getattr(meta, "candidates_token_count", 0) or 0,
+        )
+    except Exception:
+        pass
 
 
 def _extract_text(response, model: str) -> str:
@@ -83,6 +103,7 @@ class GeminiProvider(Provider):
                 response = client.models.generate_content(
                     model=model, contents=prompt, config=cfg,
                 )
+                _record_usage(response, model)
                 return _extract_text(response, model)
             except ProviderError:
                 raise  # truncated / blocked / empty — do not retry, let router fall through
@@ -121,6 +142,7 @@ class GeminiProvider(Provider):
                     response = client.models.generate_content(
                         model=model, contents=messages, config=cfg,
                     )
+                    _record_usage(response, model)
                     break
                 except Exception as e:
                     control = _classify(e)

@@ -17,6 +17,7 @@ from config import PDF_ARCHIVE_PATH, INBOX_PATH, CLIP_CONTENT_LIMIT, load_prompt
 from notes import write_note, safe_filename, today, normalize_tags
 from llm import llm_simple, parse_json_response
 from indexer import index_note, format_tag_vocabulary
+import telemetry
 
 
 def extract_pdf_text(pdf_path: Path) -> str:
@@ -61,12 +62,19 @@ def process_pdf(path: Path):
     Leaves the file untouched on any failure.
     """
     print(f"[pdf] Processing: {path.name}")
+    with telemetry.run("pdf", path.stem):
+        _process_pdf(path)
 
+
+def _process_pdf(path: Path):
+    """Extract, analyse, archive, and index one PDF. See process_pdf."""
+    telemetry.phase("extracting")
     text = extract_pdf_text(path)
     if not text.strip():
         print(f"[pdf] No text extracted from {path.name}, leaving for retry.")
         return
 
+    telemetry.phase("analysing")
     content = text[:CLIP_CONTENT_LIMIT]
 
     system_prompt = load_prompt("clip_system")
@@ -119,6 +127,7 @@ def process_pdf(path: Path):
     note_body = f"{analysis}\n\n---\n\n## Original Content\n\n{text}"
     write_note(note_path, fm, note_body)
 
+    telemetry.phase("indexing", detail=clean_title)
     index_note(
         note_title=clean_title,
         note_path=note_path,

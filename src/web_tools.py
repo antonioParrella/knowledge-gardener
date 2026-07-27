@@ -16,6 +16,7 @@ from config import (
     TAVILY_API_KEY, TAVILY_API_URL,
 )
 from academic import search_arxiv, search_openalex
+import telemetry
 
 
 # ── Source queue ────────────────────────────────────────────────────────────────
@@ -88,6 +89,9 @@ def search_web(query: str) -> str:
         )
         resp.raise_for_status()
         data = resp.json()
+        # Tavily's free tier is capped by search *count*, not dollars, so the
+        # dashboard tracks how many of the ~1,000/month have been spent.
+        telemetry.record_api("tavily")
     except Exception as e:
         return f"Web search failed: {e}"
 

@@ -18,6 +18,7 @@ from config import (
     RESEARCH_MIN_KEY_CREDITS, PREFLIGHT_CACHE_SECS,
 )
 from providers.base import QuotaExhausted, ProviderError, parse_json_response  # noqa: F401 (re-export)
+import telemetry
 
 # Lazy provider singletons — OpenRouter is only constructed on first use, and
 # only imports the openai SDK then, so the dependency stays optional.
@@ -70,6 +71,9 @@ def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[b
 
     from providers.openrouter import key_status
     status = key_status()
+    # Free headline number for the dashboard: this poll already happens before
+    # every research run, and its `usage` field is lifetime spend on the key.
+    telemetry.record_key_status(status)
 
     ok, reason = True, ""
     if status is not None:
@@ -132,6 +136,11 @@ def _run(task: str, invoke):
         except ProviderError as e:
             print(f"[llm] {prov_name}/{model} unavailable for '{task}': {e} — trying next")
             last_error = e
+        finally:
+            # Providers buffer each call's cost/tokens; only here do we know which
+            # task they served. In `finally` so a failed attempt's spend is booked
+            # too — a truncated synthesis still costs money and must show up.
+            telemetry.flush_usage(task)
     raise RuntimeError(f"All providers failed for task '{task}': {last_error}")
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from config import CALLOUT_QUIET_SECS
 from notes import read_note, write_note, today
+import telemetry
 
 from .pipeline import _run_research
 
@@ -200,25 +201,27 @@ def process_research_callout(path: Path, topic: str, depth: str = "standard"):
     write_note(path, fm, body)
 
     print(f"[research] Callout ({depth}): '{topic}' in {path.name}")
-    report, _ = _run_research(
-        topic, depth, [],
-        context=context,
-        synthesis_system_name="research_callout",
-    )
+    with telemetry.run("callout", topic, meta={"depth": depth, "note": path.name}):
+        report, _ = _run_research(
+            topic, depth, [],
+            context=context,
+            synthesis_system_name="research_callout",
+        )
 
-    inline_block = (
-        f"> [!done] Researched: {topic}\n\n"
-        f"---\n\n### {topic}\n*{today()}*\n\n{report}\n\n---\n"
-    )
+        telemetry.phase("writing", detail=path.name)
+        inline_block = (
+            f"> [!done] Researched: {topic}\n\n"
+            f"---\n\n### {topic}\n*{today()}*\n\n{report}\n\n---\n"
+        )
 
-    # Re-read (the note may have changed during the multi-minute run) and swap the
-    # in-progress marker for the result. Match tolerantly so ellipsis/whitespace
-    # drift doesn't miss it; if the marker is gone entirely (user edited/removed it),
-    # append the result rather than silently dropping a finished report.
-    fm2, body2 = read_note(path)
-    body2, n2 = _in_progress_line_re(topic).subn(lambda m: inline_block, body2, count=1)
-    if n2 == 0:
-        print(f"[research] In-progress marker missing in {path.name}; appending result.")
-        body2 = body2.rstrip() + "\n\n" + inline_block
-    write_note(path, fm2, body2)
-    print(f"[research] Callout complete: '{topic}' in {path.name}")
+        # Re-read (the note may have changed during the multi-minute run) and swap the
+        # in-progress marker for the result. Match tolerantly so ellipsis/whitespace
+        # drift doesn't miss it; if the marker is gone entirely (user edited/removed it),
+        # append the result rather than silently dropping a finished report.
+        fm2, body2 = read_note(path)
+        body2, n2 = _in_progress_line_re(topic).subn(lambda m: inline_block, body2, count=1)
+        if n2 == 0:
+            print(f"[research] In-progress marker missing in {path.name}; appending result.")
+            body2 = body2.rstrip() + "\n\n" + inline_block
+        write_note(path, fm2, body2)
+        print(f"[research] Callout complete: '{topic}' in {path.name}")

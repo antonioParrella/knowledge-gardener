@@ -17,6 +17,26 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+@pytest.fixture(autouse=True)
+def isolate_telemetry(tmp_path, monkeypatch):
+    """
+    Point telemetry at a throwaway directory for EVERY test, and mute ntfy.
+
+    Autouse and unconditional on purpose: telemetry's paths are derived from the
+    real VAULT_PATH at import, and any test that exercises a pipeline function
+    would otherwise write run state (and push phone notifications) into the live
+    vault's parent directory.
+    """
+    import telemetry
+    import notify
+
+    before = (telemetry._state_path, telemetry._events_path)
+    telemetry.configure(tmp_path / "telemetry")
+    monkeypatch.setattr(notify, "NTFY_TOPIC", "", raising=False)
+    yield telemetry
+    telemetry.configure(state_path=before[0], events_path=before[1])
+
+
 @pytest.fixture
 def tmp_vault(tmp_path, monkeypatch):
     """

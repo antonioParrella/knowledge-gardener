@@ -177,5 +177,32 @@ def load_prompt(name: str, **kwargs) -> str:
 WATCH_RECURSIVE = True
 RESCAN_INTERVAL_SECS = 60  # re-scan inbox/triggers every X seconds (iCloud doesn't fireEvents reliably)
 
+# ── Telemetry & dashboard ─────────────────────────────────────────────────────
+# Run state and the spend ledger live beside watchdog.log (outside the vault) so
+# the pipeline's own bookkeeping is never synced, indexed, or linted as a note.
+STATE_PATH  = VAULT_PATH.parent / "dashboard_state.json"  # live snapshot, rewritten in place
+EVENTS_PATH = VAULT_PATH.parent / "events.jsonl"          # append-only history (runs + LLM calls)
+EVENTS_MAX_BYTES = 5 * 1024 * 1024  # events.jsonl is truncated past this
+RECENT_RUNS = 25   # completed runs kept in the live snapshot
+DAILY_HISTORY = 60  # days of spend rollup kept in the live snapshot
+
+# Local read-only dashboard served by the watchdog thread. Binds to all
+# interfaces so a phone on the same Wi-Fi (or over Tailscale) can reach it at
+# http://<surface>:8765 — there is no auth, so keep it off untrusted networks.
+DASHBOARD_ENABLED = True
+DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_PORT = 8765
+# Mirror of the dashboard rendered into the vault, so the phone can read status
+# through Obsidian Sync with no networking at all. Set to None to disable.
+DASHBOARD_NOTE_PATH = INDEX_PATH / "_dashboard.md"
+
+# ── ntfy push notifications ───────────────────────────────────────────────────
+# Set NTFY_TOPIC to a hard-to-guess topic name (ntfy.sh topics are public to
+# anyone who knows the name) and subscribe to it in the ntfy phone app. Unset =
+# notifications off. Only the long, interesting runs notify; clips would spam.
+NTFY_TOPIC  = os.environ.get("NTFY_TOPIC", "")
+NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+NTFY_KINDS  = ("research", "concept", "callout")
+
 # ── Lint ──────────────────────────────────────────────────────────────────────
 LINT_REPORT_PATH = VAULT_PATH.parent / "lint_report.txt"  # written by lint.py

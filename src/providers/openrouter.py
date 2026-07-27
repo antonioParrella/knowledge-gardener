@@ -24,6 +24,7 @@ import json
 import requests
 
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+from telemetry import push_usage
 from .base import Provider, QuotaExhausted, ProviderError, safe_print
 
 _client = None
@@ -98,14 +99,33 @@ def _reasoning_extra_body(opts: dict) -> dict | None:
 
 def _completion_kwargs(opts: dict) -> dict:
     """Build the create() kwargs common to simple and tool_loop from routing opts."""
-    kwargs = {}
-    extra = _reasoning_extra_body(opts)
-    if extra:
-        kwargs["extra_body"] = extra
+    # `usage: {include: true}` makes OpenRouter return the call's real charge in
+    # `usage.cost` (US dollars). It's the only trustworthy per-call cost figure —
+    # a token estimate can't know the reasoning surcharge or the cache discount —
+    # and it's what the dashboard attributes to each run.
+    extra = {"usage": {"include": True}}
+    extra.update(_reasoning_extra_body(opts) or {})
+    kwargs = {"extra_body": extra}
     max_tokens = opts.get("max_tokens")
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
     return kwargs
+
+
+def _record_usage(resp, model: str) -> None:
+    """Report a completed call's cost + tokens to telemetry (never raises)."""
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return
+        push_usage(
+            "openrouter", model,
+            cost=_get_field(usage, "cost") or 0.0,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        )
+    except Exception:
+        pass
 
 
 def _to_openai_tools(tool_schema: list[dict]) -> list[dict]:
@@ -154,6 +174,9 @@ class OpenRouterProvider(Provider):
                 messages=_build_messages(prompt, system),
                 **_completion_kwargs(opts),
             )
+            # Before the completeness check: a truncated response was still paid
+            # for, and hiding its cost would understate what a failed run spent.
+            _record_usage(resp, model)
             _check_complete(resp.choices[0], model)
             return resp.choices[0].message.content or ""
         except ProviderError:
@@ -185,6 +208,7 @@ class OpenRouterProvider(Provider):
                     tool_choice="auto",
                     **kwargs,
                 )
+                _record_usage(resp, model)
                 msg = resp.choices[0].message
 
                 if not msg.tool_calls:

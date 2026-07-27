@@ -13,6 +13,7 @@ from pathlib import Path
 from config import RESEARCH_PATH
 from notes import read_note, write_note, safe_filename, today
 from indexer import index_note
+import telemetry
 
 from .pipeline import _run_research, _index_entry
 from .concepts import _conceptualize
@@ -218,76 +219,82 @@ def process_research_trigger(path: Path):
 
     print(f"[research] Starting: '{topic}' (depth: {depth})")
 
-    # Provisional name, used only to keep a re-run from feeding a report its own
-    # previous version. The real name is derived from the finished report below.
-    provisional = fm.get("output") or f"Research - {safe_filename(topic)}.md"
+    # Everything below is one dashboard "run": the phases are emitted from inside
+    # _run_research, and an exception anywhere marks the run failed (the trigger
+    # itself stays pending, so a failed run is retried on the next rescan).
+    with telemetry.run("research", topic, meta={"depth": depth}):
+        # Provisional name, used only to keep a re-run from feeding a report its own
+        # previous version. The real name is derived from the finished report below.
+        provisional = fm.get("output") or f"Research - {safe_filename(topic)}.md"
 
-    report, _ = _run_research(topic, depth, seed_urls,
-                              context=brief, context_kind="brief",
-                              exclude_research_title=provisional.replace(".md", ""))
+        report, _ = _run_research(topic, depth, seed_urls,
+                                  context=brief, context_kind="brief",
+                                  exclude_research_title=provisional.replace(".md", ""))
 
-    # Derive real topical tags and a one-line index summary from the report
-    # (not the topic's first few words / the report's first 300 characters).
-    tags, summary = _index_entry(topic, report)
+        # Derive real topical tags and a one-line index summary from the report
+        # (not the topic's first few words / the report's first 300 characters).
+        telemetry.phase("indexing")
+        tags, summary = _index_entry(topic, report)
 
-    # Name the note from the report's own H1 unless the trigger asked for a
-    # specific `output:` — a bare/absent topic still yields a proper title.
-    output_name = _research_note_name(fm, topic, report)
+        # Name the note from the report's own H1 unless the trigger asked for a
+        # specific `output:` — a bare/absent topic still yields a proper title.
+        output_name = _research_note_name(fm, topic, report)
 
-    # Write the research note
-    output_path = RESEARCH_PATH / output_name
-    write_note(
-        output_path,
-        frontmatter={
-            "generated": True,
-            "topic": topic,
-            "depth": depth,
-            "date": today(),
-            "tags": tags,
-        },
-        body=report,
-    )
-    print(f"[research] Written: {output_name}")
+        # Write the research note
+        output_path = RESEARCH_PATH / output_name
+        write_note(
+            output_path,
+            frontmatter={
+                "generated": True,
+                "topic": topic,
+                "depth": depth,
+                "date": today(),
+                "tags": tags,
+            },
+            body=report,
+        )
+        print(f"[research] Written: {output_name}")
 
-    # Index the research note itself
-    index_note(
-        note_title=output_name.replace(".md", ""),
-        note_path=output_path,
-        summary=summary,
-        tags=tags,
-        analysis=report,
-    )
+        # Index the research note itself
+        index_note(
+            note_title=output_name.replace(".md", ""),
+            note_path=output_path,
+            summary=summary,
+            tags=tags,
+            analysis=report,
+        )
 
-    # Extract foundational concepts from the finished report: link them into the
-    # report body and queue concept-explainer triggers for the ones not already in
-    # the vault. Best-effort — concepts are additive, so a failure here never blocks
-    # completing the research run.
-    try:
-        _conceptualize(output_path, report, output_name.replace(".md", ""))
-    except Exception as e:
-        print(f"[concept] Conceptualization failed for {output_name}: {e}")
-
-    # Mark trigger as done so watchdog doesn't reprocess (only the `research` flag
-    # gates reprocessing, not the body). Preserve the original brief below a
-    # completion banner rather than overwriting it — otherwise re-running a trigger
-    # (flip research: done → true) would feed the completion note in as the brief.
-    # Strip any prior banner so re-completion doesn't stack them.
-    fm["research"] = "done"
-    fm["completed"] = today()
-    banner = f"> [!done] Research completed — see [[{output_name.replace('.md', '')}]]."
-    preserved = _COMPLETION_BANNER_RE.sub("", body).lstrip()
-    done_body = f"{banner}\n\n{preserved}" if preserved else banner
-
-    # Mark done in place first (so the trigger can never be reprocessed), then move
-    # it to match the report name — a best-effort, purely cosmetic rename so the
-    # leftover triggers read as their reports rather than phone-typed titles.
-    write_note(path, fm, done_body)
-    dest = _renamed_trigger_path(path, output_name)
-    if dest is None:
-        print(f"[research] Done: '{topic}'")
-    else:
+        # Extract foundational concepts from the finished report: link them into the
+        # report body and queue concept-explainer triggers for the ones not already in
+        # the vault. Best-effort — concepts are additive, so a failure here never blocks
+        # completing the research run.
+        telemetry.phase("concepts")
         try:
-            path.rename(dest)
-            print(f"[research] Done: '{topic}' — trigger renamed → {dest.name}")
-        except OSError as e:
-            print(f"[research] Done: '{topic}' (trigger rename skipped: {e})")
+            _conceptualize(output_path, report, output_name.replace(".md", ""))
+        except Exception as e:
+            print(f"[concept] Conceptualization failed for {output_name}: {e}")
+
+        # Mark trigger as done so watchdog doesn't reprocess (only the `research` flag
+        # gates reprocessing, not the body). Preserve the original brief below a
+        # completion banner rather than overwriting it — otherwise re-running a trigger
+        # (flip research: done → true) would feed the completion note in as the brief.
+        # Strip any prior banner so re-completion doesn't stack them.
+        fm["research"] = "done"
+        fm["completed"] = today()
+        banner = f"> [!done] Research completed — see [[{output_name.replace('.md', '')}]]."
+        preserved = _COMPLETION_BANNER_RE.sub("", body).lstrip()
+        done_body = f"{banner}\n\n{preserved}" if preserved else banner
+
+        # Mark done in place first (so the trigger can never be reprocessed), then move
+        # it to match the report name — a best-effort, purely cosmetic rename so the
+        # leftover triggers read as their reports rather than phone-typed titles.
+        write_note(path, fm, done_body)
+        dest = _renamed_trigger_path(path, output_name)
+        if dest is None:
+            print(f"[research] Done: '{topic}'")
+        else:
+            try:
+                path.rename(dest)
+                print(f"[research] Done: '{topic}' — trigger renamed → {dest.name}")
+            except OSError as e:
+                print(f"[research] Done: '{topic}' (trigger rename skipped: {e})")

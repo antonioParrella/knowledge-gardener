@@ -15,6 +15,7 @@ from web_tools import TOOL_SCHEMA, execute_tool, reset_queue, get_queue
 from indexer import (
     find_relevant_clippings, find_relevant_research, format_tag_vocabulary, one_line,
 )
+import telemetry
 
 from .sources import _process_source
 from .synthesis import (
@@ -105,6 +106,7 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     # ① Relevant existing clippings (primary sources) and prior research reports
     #    (related work). These are kept in separate lanes: clippings become cited
     #    sources; prior research is context the report builds on and cross-links to.
+    telemetry.phase("prior-knowledge")
     existing = find_relevant_clippings(topic)
     if existing:
         print(f"[research] Found {len(existing)} relevant existing clipping(s).")
@@ -113,6 +115,7 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
         print(f"[research] Found {len(prior_research)} related prior research report(s).")
 
     # ② Discovery tool loop
+    telemetry.phase("discovery")
     prompt = _build_discovery_prompt(topic, depth, seed_urls, existing,
                                      context=context, context_kind=context_kind,
                                      prior_research=prior_research)
@@ -125,18 +128,24 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     )
 
     # ③ Process queued sources into indexed clippings
+    queue = get_queue()
+    telemetry.phase("sources", progress=(0, len(queue)))
     newly: list[dict] = []
-    for entry in get_queue():
+    for i, entry in enumerate(queue, start=1):
+        telemetry.set_detail(entry.get("title") or entry.get("url", ""),
+                             progress=(i, len(queue)))
         result = _process_source(entry)
         if result:
             newly.append(result)
     print(f"[research] Processed {len(newly)} new source(s) into the knowledge base.")
 
     # ④ Synthesis
+    telemetry.phase("synthesis")
     all_sources = existing + newly
     report = _synthesise(topic, all_sources, depth,
                          context=context, system_name=synthesis_system_name,
                          context_kind=context_kind, prior_research=prior_research)
+    telemetry.phase("citations")
     _, valid_titles = _build_source_block(all_sources)
     valid_titles |= {p["title"] for p in prior_research}
     report = _repair_wikilinks(report, valid_titles)
