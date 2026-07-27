@@ -113,6 +113,28 @@ def _titlecase_topic(topic: str) -> str:
     return " ".join(words)
 
 
+# Punctuation that legitimately appears in a topic name; everything else is
+# stripped. A whitelist (not a blocklist) because the moc-assignment model leaks
+# assorted stray tokens — '</S>', a lone '<', a trailing '}' — and a blocklist of
+# just filename-illegal chars misses the legal-but-junk ones like '}' (which don't
+# crash the write but spawn a near-duplicate MOC, e.g. 'Schizophrenia}').
+_TOPIC_ALLOWED = r"\w\s&(),.'-"
+
+
+def sanitize_moc_topic(topic: str) -> str:
+    """
+    Clean a MOC topic so it is safe as a filename and free of model artifacts.
+
+    A MOC topic becomes a filename ("MOC - <topic>.md") and a dedup key, so a
+    stray character both risks a WinError 123 write crash (on '<', '/', etc.) and
+    spawns a junk near-duplicate MOC beside the real one. Strip any HTML-ish tag
+    fragment, then keep only whitelisted topic characters, then tidy whitespace.
+    """
+    topic = re.sub(r"<[^>]*>", "", topic)                 # <s>…</s> or </s> fragments
+    topic = re.sub(f"[^{_TOPIC_ALLOWED}]", "", topic)     # drop everything not whitelisted
+    return re.sub(r"\s+", " ", topic).strip(" .-")
+
+
 def get_existing_mocs() -> str:
     """Return a plain-text summary of all existing MOCs for the agent."""
     mocs = list(INDEX_PATH.glob("MOC - *.md"))
@@ -155,6 +177,7 @@ def assign_to_moc(note_title: str, summary: str, tags: list[str], analysis: str 
         first_line = topic.splitlines()[0].strip().strip("'\".,*-# ")
         words = first_line.split()
         topic = " ".join(words[:3]) if words else "General"
+    topic = sanitize_moc_topic(topic) or "General"
     return _titlecase_topic(topic)
 
 
@@ -170,6 +193,9 @@ def update_moc(moc_topic: str, note_title: str, note_path: Path, summary: str,
     sources and its concept notes visually separate. A missing section heading is
     created on demand (appended after the existing body).
     """
+    # Defensive: never let a caller build a filename with illegal characters,
+    # even if the topic didn't come through assign_to_moc.
+    moc_topic = sanitize_moc_topic(moc_topic) or "General"
     moc_path = INDEX_PATH / f"MOC - {moc_topic}.md"
 
     # Load or initialise the MOC
