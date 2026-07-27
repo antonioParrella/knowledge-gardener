@@ -620,12 +620,32 @@ Everything here is best-effort: telemetry swallows its own errors, the server ru
 in a daemon thread, and a failed note write is logged and dropped. Losing the
 dashboard never costs a run.
 
+### Phone access — open the firewall first
+
+The dashboard binds all interfaces and the watchdog logs every URL it's reachable
+at when it starts. But **Windows blocks inbound connections to `python.exe` by
+default**, so the page works on the Surface and times out from the phone until you
+add one rule. Run this **once**, in an *elevated* PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "Knowledge Gardener dashboard" `
+  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Private
+```
+
+`-Profile Private` covers home Wi-Fi and the Tailscale interface (both register as
+Private) while still refusing connections on Public networks — which is the right
+default given the dashboard has no auth. A port rule rather than a program rule on
+purpose: recreating `venv/` replaces `python.exe` and would silently break a
+program-scoped rule.
+
+Symptom check: "connection refused" from the phone but fine on the Surface means
+either this rule is missing, or the server bound loopback only.
+
 ### Phone access from anywhere (Tailscale)
 
-The dashboard binds to all interfaces, so a phone on the **same Wi-Fi** reaches it
-at `http://<surface-ip>:8765` (the watchdog logs the exact URL at start-up). There
-is no auth — keep it off untrusted networks. For access from anywhere, use
-Tailscale rather than port forwarding:
+With the rule above in place, a phone on the **same Wi-Fi** reaches the dashboard
+at `http://<surface-ip>:8765`. There is no auth — keep it off untrusted networks.
+For access from anywhere, use Tailscale rather than port forwarding:
 
 1. Install Tailscale on the Surface (`winget install tailscale.tailscale`) and
    sign in — this puts the machine on your private tailnet.

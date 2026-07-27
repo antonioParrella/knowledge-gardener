@@ -102,8 +102,8 @@ _server = None
 
 def start_dashboard() -> str | None:
     """
-    Start the dashboard on a daemon thread. Returns the URL, or None if disabled
-    or unavailable (a taken port must not stop the watchdog from running).
+    Start the dashboard on a daemon thread. Returns the primary URL, or None if
+    disabled or unavailable (a taken port must not stop the watchdog running).
     """
     global _server
     if not DASHBOARD_ENABLED:
@@ -113,7 +113,10 @@ def start_dashboard() -> str | None:
         _server.daemon_threads = True
         threading.Thread(target=_server.serve_forever, daemon=True,
                          name="dashboard").start()
-        return f"http://{_local_ip()}:{DASHBOARD_PORT}"
+        urls = reachable_urls()
+        for label, url in urls[1:]:
+            print(f"[dashboard] {label}: {url}")
+        return urls[0][1]
     except Exception as e:
         print(f"[dashboard] could not start on port {DASHBOARD_PORT}: {e}")
         return None
@@ -128,6 +131,44 @@ def _local_ip() -> str:
             return s.getsockname()[0]
     except Exception:
         return "localhost"
+
+
+def _tailscale_ip() -> str | None:
+    """
+    This machine's tailnet address, if Tailscale is up.
+
+    Tailscale hands out addresses from 100.64.0.0/10 (the CGNAT range), so any
+    local IPv4 in 100.64–100.127 is the tailnet interface. Worth surfacing
+    separately: it is the one address that works from the phone off Wi-Fi.
+    """
+    import socket
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            first, second = ip.split(".")[:2]
+            if first == "100" and 64 <= int(second) <= 127:
+                return ip
+    except Exception:
+        pass
+    return None
+
+
+def reachable_urls() -> list[tuple[str, str]]:
+    """
+    (label, url) pairs this dashboard should be reachable at, best first.
+
+    Printed at start-up because "which address do I open on my phone" is the
+    whole question, and the answer differs by network: the LAN address at home,
+    the tailnet address anywhere else.
+    """
+    urls = [("on this machine", f"http://localhost:{DASHBOARD_PORT}")]
+    lan = _local_ip()
+    if lan != "localhost":
+        urls.insert(0, ("on your Wi-Fi", f"http://{lan}:{DASHBOARD_PORT}"))
+    ts = _tailscale_ip()
+    if ts:
+        urls.insert(0, ("over Tailscale, from anywhere", f"http://{ts}:{DASHBOARD_PORT}"))
+    return urls
 
 
 # ── Vault note ───────────────────────────────────────────────────────────────────
@@ -836,10 +877,14 @@ def _demo():
         "progress": {"done": 4, "total": 11}, "cost_usd": 0.42, "calls": 23, "error": None,
     }
 
-    url = f"http://localhost:{DASHBOARD_PORT}"
-    server = ThreadingHTTPServer(("127.0.0.1", DASHBOARD_PORT), _Handler)
-    print(f"Demo dashboard on {url} — Ctrl+C to stop")
-    print(f"Vault note preview:\n\n{_render_note(_payload())}\n")
+    # Binds DASHBOARD_HOST, not loopback: the main reason to run the demo is to
+    # check the page on your phone before committing to a watchdog restart, and
+    # a 127.0.0.1 bind makes that impossible.
+    server = ThreadingHTTPServer((DASHBOARD_HOST, DASHBOARD_PORT), _Handler)
+    print("Demo dashboard — Ctrl+C to stop")
+    for label, url in reachable_urls():
+        print(f"  {url}  ({label})")
+    print(f"\nVault note preview:\n\n{_render_note(_payload())}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

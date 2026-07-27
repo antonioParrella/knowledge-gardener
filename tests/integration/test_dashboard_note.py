@@ -54,6 +54,39 @@ def test_write_failure_is_swallowed(tmp_path):
     dashboard.write_vault_note(tmp_path)                   # a directory, not a file
 
 
+def test_demo_binds_the_configured_host_not_loopback(monkeypatch):
+    """
+    Regression: the demo server bound 127.0.0.1, so the phone could never reach
+    it — which is the main reason to run the demo at all. It must bind the same
+    interface the real dashboard does.
+    """
+    import config
+    bound = {}
+
+    class _StubServer:
+        def __init__(self, address, handler):
+            bound["address"] = address
+
+        def serve_forever(self):
+            raise KeyboardInterrupt          # return immediately
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(dashboard, "ThreadingHTTPServer", _StubServer)
+    dashboard._demo()
+
+    assert bound["address"] == (config.DASHBOARD_HOST, config.DASHBOARD_PORT)
+    assert bound["address"][0] != "127.0.0.1"
+
+
+def test_reachable_urls_always_offers_a_local_address():
+    urls = dashboard.reachable_urls()
+    assert urls, "start-up must always print at least one URL"
+    assert any("localhost" in url for _, url in urls)
+    assert all(url.endswith(str(dashboard.DASHBOARD_PORT)) for _, url in urls)
+
+
 def test_api_state_is_served(tmp_path):
     """The page's only data source, exercised end to end over HTTP."""
     import json
