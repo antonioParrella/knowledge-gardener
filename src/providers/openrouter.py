@@ -13,16 +13,61 @@ OpenRouter is a single OpenAI-wire gateway to many models, so this uses the
     message's `reasoning_details` (preferred) or `reasoning` echoed back, or the
     next request loses reasoning context. We capture and resend it.
 
-Any error (including a missing API key) raises ProviderError so the router in
-llm.py falls through to the next chain entry.
+Errors are classified for the router in llm.py: a spent key/credit cap (HTTP 402,
+or a 403 "Key limit exceeded") raises QuotaExhausted so the model goes on a
+cooldown and stops being re-attempted every call; any other error (including a
+missing API key) raises ProviderError to fall through to the next chain entry.
 """
 
 import json
 
+import requests
+
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
-from .base import Provider, ProviderError, safe_print
+from .base import Provider, QuotaExhausted, ProviderError, safe_print
 
 _client = None
+
+
+def _classify(model: str, e: Exception) -> Exception:
+    """
+    Map a raw SDK exception to a router control-flow exception.
+
+    A recoverable spend cap — HTTP 402 (out of credits) or a 403 whose body says
+    "key limit exceeded" — becomes QuotaExhausted so llm.py parks the model on a
+    cooldown instead of hammering it every call; topping up / raising the cap lets
+    it resume. Everything else (bad key, network, 5xx) stays ProviderError.
+    """
+    status = getattr(e, "status_code", None)
+    low = str(e).lower()
+    if status == 402 or "key limit exceeded" in low or "insufficient credit" in low:
+        return QuotaExhausted(f"{model}: {e}")
+    return ProviderError(f"{model}: {e}")
+
+
+def key_status(timeout: float = 8.0) -> dict | None:
+    """
+    Live snapshot of the API key's OpenRouter limits via GET /api/v1/key.
+
+    Returns the `data` object ({usage, limit, limit_remaining, is_free_tier, …});
+    `limit` / `limit_remaining` are None when the key has no spend cap. Returns
+    None if the key is unset or the call fails/parses badly — an *inconclusive*
+    reading the caller must treat as "don't block" rather than "no credit".
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"{OPENROUTER_BASE_URL}/key",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data")
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        safe_print(f"[openrouter] key status check failed ({e}) — treating as inconclusive")
+        return None
 
 
 def _get_client():
@@ -114,7 +159,7 @@ class OpenRouterProvider(Provider):
         except ProviderError:
             raise
         except Exception as e:
-            raise ProviderError(f"{model}: {e}") from e
+            raise _classify(model, e) from e
 
     def tool_loop(
         self,
@@ -183,4 +228,4 @@ class OpenRouterProvider(Provider):
         except ProviderError:
             raise
         except Exception as e:
-            raise ProviderError(f"{model}: {e}") from e
+            raise _classify(model, e) from e

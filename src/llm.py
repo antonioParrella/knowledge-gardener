@@ -13,7 +13,10 @@ Gemini on the high-volume cheap tasks and routes research to DeepSeek V4 Pro
 
 import time
 
-from config import ROUTING, MAX_SEARCH_ITERATIONS, QUOTA_COOLDOWN_SECS
+from config import (
+    ROUTING, MAX_SEARCH_ITERATIONS, QUOTA_COOLDOWN_SECS,
+    RESEARCH_MIN_KEY_CREDITS, PREFLIGHT_CACHE_SECS,
+)
 from providers.base import QuotaExhausted, ProviderError, parse_json_response  # noqa: F401 (re-export)
 
 # Lazy provider singletons — OpenRouter is only constructed on first use, and
@@ -31,6 +34,58 @@ _cooldown_until: dict[tuple[str, str], float] = {}
 def _is_cooling(prov_name: str, model: str) -> bool:
     until = _cooldown_until.get((prov_name, model))
     return until is not None and time.time() < until
+
+
+def _clear_cooldown(prov_name: str) -> None:
+    """Un-park every model of a provider — used when preflight has live evidence
+    the provider is usable again, so a stale timer doesn't outlive the outage."""
+    for key in [k for k in _cooldown_until if k[0] == prov_name]:
+        del _cooldown_until[key]
+
+
+# Preflight result cache: (expiry_epoch, ok, reason). The /key poll is shared
+# across a whole rescan batch instead of run per note.
+_preflight_cache: tuple[float, bool, str] | None = None
+
+
+def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[bool, str]:
+    """
+    Gate an OpenRouter-only run (research / concept / callout synthesis) on the
+    key's live remaining credit. Returns (ok, reason); reason is "" when ok.
+
+    Blocks ONLY on a confident low-credit reading. An unset key, a key with no
+    spend cap, or an unreachable /key endpoint all pass (fail-open) so a transient
+    blip can't wedge all research — a genuine outage is still caught by the
+    per-call cooldown at synthesis time. A reading that shows usable credit clears
+    any OpenRouter cooldown, so a just-raised limit resumes on the next rescan
+    instead of waiting out a stale 30-minute timer.
+    """
+    global _preflight_cache
+    if min_credits <= 0:
+        return True, ""
+
+    now = time.time()
+    if _preflight_cache and now < _preflight_cache[0]:
+        return _preflight_cache[1], _preflight_cache[2]
+
+    from providers.openrouter import key_status
+    status = key_status()
+
+    ok, reason = True, ""
+    if status is not None:
+        remaining = status.get("limit_remaining")
+        if remaining is not None and remaining < min_credits:
+            ok = False
+            reason = (
+                f"OpenRouter key credit ${remaining:.2f} < ${min_credits:.2f} required — "
+                f"research paused until the key limit is raised or usage resets"
+            )
+        else:
+            # Live evidence the key is usable (credit above threshold, or no cap).
+            _clear_cooldown("openrouter")
+
+    _preflight_cache = (now + PREFLIGHT_CACHE_SECS, ok, reason)
+    return ok, reason
 
 
 def _provider(name: str):

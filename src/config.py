@@ -56,12 +56,26 @@ TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 GEMINI_THINKING_LEVEL = "high"  # "minimal" | "low" | "medium" | "high"
 
-# When a model raises QuotaExhausted (daily free-tier cap hit), the router marks
-# it as cooling down for this long and skips it on subsequent calls instead of
-# re-attempting a doomed request every time. Kept short so a reset quota (Gemini
-# free tier resets daily, ~midnight Pacific) is re-probed promptly — at most one
-# wasted probe per model per window.
+# When a model raises QuotaExhausted (daily free-tier cap hit, or an OpenRouter
+# key/credit cap), the router marks it as cooling down for this long and skips it
+# on subsequent calls instead of re-attempting a doomed request every time. Kept
+# short so a reset quota (Gemini free tier resets daily, ~midnight Pacific) is
+# re-probed promptly — at most one wasted probe per model per window.
 QUOTA_COOLDOWN_SECS = 1800  # 30 minutes
+
+# ── OpenRouter preflight ──────────────────────────────────────────────────────
+# Research / concept / callout synthesis is OpenRouter-only (no Gemini fallback),
+# so before starting one of those runs the router polls the key's live remaining
+# credit via GET /api/v1/key. If the key has a spend cap set and fewer than this
+# many dollars remain, the run is BLOCKED before it gathers sources — the trigger
+# stays pending and auto-resumes on a later rescan once the cap is raised or usage
+# resets, rather than doing all the discovery work then dying at synthesis. A
+# single comprehensive run on DeepSeek V4 Pro at xhigh reasoning can cost roughly
+# this much; tune to about one run's cost. Set 0 to disable preflight blocking.
+RESEARCH_MIN_KEY_CREDITS = 0.20  # US dollars
+# The /key reading is cached this long so one rescan batch polls once, not per
+# note. Kept at the rescan interval so a restored limit is seen within one cycle.
+PREFLIGHT_CACHE_SECS = 60
 
 # ── LLM routing ─────────────────────────────────────────────────────────────────
 # Per-task provider chains. Each task maps to an ordered list of

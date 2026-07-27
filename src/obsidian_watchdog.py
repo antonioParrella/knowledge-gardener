@@ -38,6 +38,7 @@ from researcher import (
 )
 from notes import read_note
 from pdf_processor import process_pdf, find_unprocessed_pdfs
+from llm import research_preflight
 
 # Serializes all pipeline work between the observer's event thread and the main
 # thread's periodic rescan. Without it, a research run writing source clips to
@@ -111,6 +112,17 @@ sys.stdout = _StreamToLogger(_pipeline_logger, logging.INFO)
 sys.stderr = _StreamToLogger(_pipeline_logger, logging.ERROR)
 
 
+def _research_blocked() -> str | None:
+    """
+    Reason string if OpenRouter-only runs (research / concept / callout synthesis)
+    should be skipped right now, else None. Cheap and cached — safe to call per
+    rescan and per event. When blocked, callers leave the trigger/callout pending
+    so it auto-resumes on a later rescan once the key limit is restored.
+    """
+    ok, reason = research_preflight()
+    return None if ok else reason
+
+
 # ── Startup checks ────────────────────────────────────────────────────────────
 
 def startup_checks():
@@ -155,29 +167,33 @@ def startup_checks():
                 log.error(f"Error processing backlog {path.name}: {e}")
             time.sleep(3)
 
-    pending_triggers = find_pending_triggers(TRIGGERS_PATH)
-    if pending_triggers:
-        log.info(f"Found {len(pending_triggers)} pending research trigger(s) from previous sessions")
-        for path in pending_triggers:
-            try:
-                log.info(f"Processing backlog trigger: {path.name}")
-                process_research_trigger(path)
-            except Exception as e:
-                log.error(f"Error processing backlog trigger {path.name}: {e}")
-            time.sleep(3)
+    blocked = _research_blocked()
+    if blocked:
+        log.warning(f"[preflight] leaving research/concept backlog pending — {blocked}")
+    else:
+        pending_triggers = find_pending_triggers(TRIGGERS_PATH)
+        if pending_triggers:
+            log.info(f"Found {len(pending_triggers)} pending research trigger(s) from previous sessions")
+            for path in pending_triggers:
+                try:
+                    log.info(f"Processing backlog trigger: {path.name}")
+                    process_research_trigger(path)
+                except Exception as e:
+                    log.error(f"Error processing backlog trigger {path.name}: {e}")
+                time.sleep(3)
 
-    # Concept triggers (written by the conceptualizer pass) drained after research
-    # triggers, since a research run is what queues them.
-    pending_concepts = find_pending_concept_triggers(TRIGGERS_PATH)
-    if pending_concepts:
-        log.info(f"Found {len(pending_concepts)} pending concept trigger(s) from previous sessions")
-        for path in pending_concepts:
-            try:
-                log.info(f"Processing backlog concept: {path.name}")
-                process_concept_trigger(path)
-            except Exception as e:
-                log.error(f"Error processing backlog concept {path.name}: {e}")
-            time.sleep(3)
+        # Concept triggers (written by the conceptualizer pass) drained after research
+        # triggers, since a research run is what queues them.
+        pending_concepts = find_pending_concept_triggers(TRIGGERS_PATH)
+        if pending_concepts:
+            log.info(f"Found {len(pending_concepts)} pending concept trigger(s) from previous sessions")
+            for path in pending_concepts:
+                try:
+                    log.info(f"Processing backlog concept: {path.name}")
+                    process_concept_trigger(path)
+                except Exception as e:
+                    log.error(f"Error processing backlog concept {path.name}: {e}")
+                time.sleep(3)
 
 
 # ── File event handler ────────────────────────────────────────────────────────
@@ -235,7 +251,11 @@ class VaultHandler(FileSystemEventHandler):
                     # Concept and research triggers share the _triggers/ folder;
                     # dispatch on the frontmatter flag.
                     fm, _ = read_note(path)
-                    if fm.get("concept") is True:
+                    blocked = _research_blocked()
+                    if blocked:
+                        # Leave it pending; the rescan re-runs it once credit is back.
+                        log.warning(f"[preflight] deferring {path.name} — {blocked}")
+                    elif fm.get("concept") is True:
                         log.info(f"New concept trigger: {path.name}")
                         process_concept_trigger(path)
                     else:
@@ -293,40 +313,48 @@ def main():
                     except Exception as e:
                         log.error(f"Error processing {path.name}: {e}")
                     time.sleep(3)
-                # Triggers whose create event was missed or whose run crashed
-                # (iCloud events are unreliable — same reason clips are rescanned).
-                for path in find_pending_triggers(TRIGGERS_PATH):
-                    try:
-                        log.info(f"Processing trigger: {path.name}")
-                        with PIPELINE_LOCK:
-                            process_research_trigger(path)
-                    except Exception as e:
-                        log.error(f"Trigger error {path.name}: {e}")
-                    time.sleep(3)
-                # Concept triggers, drained after research triggers (a research run
-                # is what queues them, so any just-created ones are picked up here).
-                for path in find_pending_concept_triggers(TRIGGERS_PATH):
-                    try:
-                        log.info(f"Processing concept trigger: {path.name}")
-                        with PIPELINE_LOCK:
-                            process_concept_trigger(path)
-                    except Exception as e:
-                        log.error(f"Concept trigger error {path.name}: {e}")
-                    time.sleep(3)
-                # Re-arm callouts stranded at "[!info] Researching…" by a crashed or
-                # OpenRouter-down run (also runs on the first post-startup rescan).
-                with PIPELINE_LOCK:
-                    revert_stale_callouts([VAULT_PATH], STALE_CALLOUT_SECS)
-                # Callouts can live in ANY note in the vault — they're answered
-                # in place, like a review comment (see find_research_callouts).
-                for cpath, ctopic, cdepth in find_research_callouts([VAULT_PATH]):
-                    try:
-                        log.info(f"Processing callout ({cdepth}): '{ctopic}' in {cpath.name}")
-                        with PIPELINE_LOCK:
-                            process_research_callout(cpath, ctopic, cdepth)
-                    except Exception as e:
-                        log.error(f"Callout error in {cpath.name}: {e}")
-                    time.sleep(3)
+                # Research, concept, and callout runs all end in OpenRouter-only
+                # synthesis, so gate the whole group on one preflight reading. When
+                # blocked they stay pending and resume on a later rescan once the
+                # key limit is restored (see research_preflight in llm.py).
+                blocked = _research_blocked()
+                if blocked:
+                    log.warning(f"[preflight] skipping research/concept/callout runs — {blocked}")
+                else:
+                    # Triggers whose create event was missed or whose run crashed
+                    # (iCloud events are unreliable — same reason clips are rescanned).
+                    for path in find_pending_triggers(TRIGGERS_PATH):
+                        try:
+                            log.info(f"Processing trigger: {path.name}")
+                            with PIPELINE_LOCK:
+                                process_research_trigger(path)
+                        except Exception as e:
+                            log.error(f"Trigger error {path.name}: {e}")
+                        time.sleep(3)
+                    # Concept triggers, drained after research triggers (a research run
+                    # is what queues them, so any just-created ones are picked up here).
+                    for path in find_pending_concept_triggers(TRIGGERS_PATH):
+                        try:
+                            log.info(f"Processing concept trigger: {path.name}")
+                            with PIPELINE_LOCK:
+                                process_concept_trigger(path)
+                        except Exception as e:
+                            log.error(f"Concept trigger error {path.name}: {e}")
+                        time.sleep(3)
+                    # Re-arm callouts stranded at "[!info] Researching…" by a crashed or
+                    # OpenRouter-down run (also runs on the first post-startup rescan).
+                    with PIPELINE_LOCK:
+                        revert_stale_callouts([VAULT_PATH], STALE_CALLOUT_SECS)
+                    # Callouts can live in ANY note in the vault — they're answered
+                    # in place, like a review comment (see find_research_callouts).
+                    for cpath, ctopic, cdepth in find_research_callouts([VAULT_PATH]):
+                        try:
+                            log.info(f"Processing callout ({cdepth}): '{ctopic}' in {cpath.name}")
+                            with PIPELINE_LOCK:
+                                process_research_callout(cpath, ctopic, cdepth)
+                        except Exception as e:
+                            log.error(f"Callout error in {cpath.name}: {e}")
+                        time.sleep(3)
     except KeyboardInterrupt:
         log.info("Stopping...")
         observer.stop()
