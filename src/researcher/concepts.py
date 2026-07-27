@@ -23,7 +23,7 @@ import telemetry
 
 from .sources import _process_source
 from .synthesis import _build_source_block, _repair_wikilinks, _WIKILINK_RE
-from .pipeline import _index_entry
+from .pipeline import _index_entry, _best_effort
 
 
 def _concept_path(term: str) -> Path:
@@ -335,7 +335,7 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
 
     # Existing clippings can seed the explainer (reused, never re-fetched).
     telemetry.phase("prior-knowledge")
-    existing = find_relevant_clippings(term)
+    existing = _best_effort("clippings", find_relevant_clippings, term)
     if existing:
         print(f"[concept] Found {len(existing)} relevant existing clipping(s).")
 
@@ -365,7 +365,11 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
     for i, entry in enumerate(queue, start=1):
         telemetry.set_detail(entry.get("title") or entry.get("url", ""),
                              progress=(i, len(queue)))
-        result = _process_source(entry)
+        try:
+            result = _process_source(entry)
+        except Exception as e:
+            print(f"[concept] Source failed, skipping ({entry.get('url', '')}): {e}")
+            continue
         if result:
             newly.append(result)
     if newly:

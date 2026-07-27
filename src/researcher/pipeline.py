@@ -84,6 +84,29 @@ def _build_discovery_prompt(topic: str, depth: str, seed_urls: list[str],
     return "\n\n".join(parts)
 
 
+# ── Best-effort prior knowledge ──────────────────────────────────────────────────
+
+def _best_effort(label: str, fn, *args, **kwargs) -> list:
+    """
+    Run a phase ① lookup, degrading to "found nothing" instead of failing the run.
+
+    Phase ① is an optimisation: it surfaces what the vault already knows so the
+    report can build on it rather than re-derive it. Losing that costs quality;
+    losing the whole run costs everything. On 2026-07-27 a truncated
+    MOC-assignment call on the OpenRouter fallback (see config § CHEAP_MAX_OUTPUT_TOKENS)
+    raised out of find_relevant_clippings and killed a comprehensive callout nine
+    minutes in, before it had gathered a single source.
+
+    Every downstream consumer already handles an empty list — that's the no-prior-
+    knowledge case a fresh vault hits on its first run.
+    """
+    try:
+        return fn(*args, **kwargs) or []
+    except Exception as e:
+        print(f"[research] Prior-knowledge lookup failed ({label}): {e} — continuing without it")
+        return []
+
+
 # ── Core pipeline ────────────────────────────────────────────────────────────────
 
 def _run_research(topic: str, depth: str, seed_urls: list[str],
@@ -107,10 +130,11 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     #    (related work). These are kept in separate lanes: clippings become cited
     #    sources; prior research is context the report builds on and cross-links to.
     telemetry.phase("prior-knowledge")
-    existing = find_relevant_clippings(topic)
+    existing = _best_effort("clippings", find_relevant_clippings, topic)
     if existing:
         print(f"[research] Found {len(existing)} relevant existing clipping(s).")
-    prior_research = find_relevant_research(topic, exclude_title=exclude_research_title)
+    prior_research = _best_effort("prior research", find_relevant_research, topic,
+                                  exclude_title=exclude_research_title)
     if prior_research:
         print(f"[research] Found {len(prior_research)} related prior research report(s).")
 
@@ -134,7 +158,14 @@ def _run_research(topic: str, depth: str, seed_urls: list[str],
     for i, entry in enumerate(queue, start=1):
         telemetry.set_detail(entry.get("title") or entry.get("url", ""),
                              progress=(i, len(queue)))
-        result = _process_source(entry)
+        # One bad source must not discard the other twenty-two. A fetch, an
+        # analysis call, or a MOC assignment can fail for reasons specific to
+        # this one document; the run continues with the sources that did work.
+        try:
+            result = _process_source(entry)
+        except Exception as e:
+            print(f"[research] Source failed, skipping ({entry.get('url', '')}): {e}")
+            continue
         if result:
             newly.append(result)
     print(f"[research] Processed {len(newly)} new source(s) into the knowledge base.")

@@ -103,16 +103,29 @@ OR_PRO          = "deepseek/deepseek-v4-pro"
 # `max_tokens` (OpenRouter) / `max_output_tokens` (Gemini) via the routing opts.
 RESEARCH_MAX_OUTPUT_TOKENS = 32000
 
+# The same discipline applied to the cheap tasks. clip/moc normally run on free
+# Gemini, so their OpenRouter entry is a rarely-exercised fallback that only fires
+# once both free buckets are spent — and it was the one chain entry with no output
+# ceiling and no reasoning bound. Observed 2026-07-27: a single MOC-assignment call
+# on DeepSeek V4 Flash spent 65,537 output tokens (its entire default budget,
+# essentially all of it reasoning about which MOC a note belongs in), hit the cap,
+# and was cut off. The router treats a truncated response as a hard provider error,
+# so with both Gemini entries in quota cooldown the whole callout run died nine
+# minutes in. These tasks return small JSON and are classification, not analysis:
+# bound the thinking and leave generous room for the answer.
+CHEAP_MAX_OUTPUT_TOKENS = 16000
+OR_CHEAP_OPTS = {"reasoning_effort": "minimal", "max_tokens": CHEAP_MAX_OUTPUT_TOKENS}
+
 ROUTING = {
     "clip": [
         ("gemini",     GEMINI_FLASH_35, {}),
         ("gemini",     GEMINI_FLASH,    {}),
-        ("openrouter", OR_FLASH,        {}),
+        ("openrouter", OR_FLASH,        OR_CHEAP_OPTS),
     ],
     "moc": [
         ("gemini",     GEMINI_FLASH_35, {}),
         ("gemini",     GEMINI_FLASH,    {}),
-        ("openrouter", OR_FLASH,        {}),
+        ("openrouter", OR_FLASH,        OR_CHEAP_OPTS),
     ],
     # Discovery tool loop only — it gathers sources that become Gemini-processed
     # clippings, so a Gemini fallback here is acceptable when OpenRouter is down.
