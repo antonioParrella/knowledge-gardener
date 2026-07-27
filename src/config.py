@@ -106,15 +106,27 @@ RESEARCH_MAX_OUTPUT_TOKENS = 32000
 # The same discipline applied to the cheap tasks. clip/moc normally run on free
 # Gemini, so their OpenRouter entry is a rarely-exercised fallback that only fires
 # once both free buckets are spent — and it was the one chain entry with no output
-# ceiling and no reasoning bound. Observed 2026-07-27: a single MOC-assignment call
-# on DeepSeek V4 Flash spent 65,537 output tokens (its entire default budget,
-# essentially all of it reasoning about which MOC a note belongs in), hit the cap,
-# and was cut off. The router treats a truncated response as a hard provider error,
-# so with both Gemini entries in quota cooldown the whole callout run died nine
-# minutes in. These tasks return small JSON and are classification, not analysis:
-# bound the thinking and leave generous room for the answer.
-CHEAP_MAX_OUTPUT_TOKENS = 16000
-OR_CHEAP_OPTS = {"reasoning_effort": "minimal", "max_tokens": CHEAP_MAX_OUTPUT_TOKENS}
+# ceiling. Observed 2026-07-27: one MOC-assignment call on DeepSeek V4 Flash spent
+# 65,537 output tokens (its whole default budget, essentially all reasoning), hit
+# the cap, and was cut off.
+#
+# This is a WASTE limiter, not a correctness mechanism. What keeps a truncated
+# cheap call from killing a run is the best-effort handling in researcher/pipeline
+# (`_best_effort` and the per-source guard); the ceiling only decides how much is
+# burned before we find out — 65K tokens and nine minutes, or half that.
+#
+# Deliberately NOT capping reasoning here. The same run made 53 clip/moc calls on
+# this model and 52 were fine, so the runaway is an outlier (~1 in 54), and the
+# Gemini primary runs these tasks at thinking_level "high" — throttling the
+# fallback to minimal reasoning would make it markedly weaker than the path it
+# stands in for, degrading 53 calls to prevent one.
+#
+# Sized off measured behaviour, not a guess: legitimate calls that day ran to
+# 16,635 output tokens (a find_relevant_clippings over the full MOC catalog), so a
+# ceiling must sit well above that. An earlier 16,000 would have truncated that
+# very call — the ceiling has to clear the real distribution's tail, not its mean.
+CHEAP_MAX_OUTPUT_TOKENS = 32000
+OR_CHEAP_OPTS = {"max_tokens": CHEAP_MAX_OUTPUT_TOKENS}
 
 ROUTING = {
     "clip": [

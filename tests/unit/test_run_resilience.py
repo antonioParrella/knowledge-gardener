@@ -35,19 +35,28 @@ def test_cheap_openrouter_fallbacks_have_an_output_ceiling():
             )
 
 
-def test_cheap_tasks_bound_their_reasoning():
-    """Classification does not need extended reasoning — that's what ran away."""
+def test_cheap_tasks_do_not_throttle_reasoning():
+    """
+    The fallback must not be dumber than the path it stands in for. Gemini runs
+    clip/moc at thinking_level "high", and 52 of 53 observed calls on the
+    OpenRouter fallback were fine — so throttling reasoning would degrade the
+    many to prevent the rare outlier.
+    """
     for task in ("clip", "moc"):
         for provider, _model, opts in config.ROUTING[task]:
             if provider == "openrouter":
-                assert opts.get("reasoning_effort") == "minimal"
+                assert "reasoning_effort" not in opts
 
 
-def test_the_cheap_cap_is_well_under_the_observed_runaway():
-    """65,537 tokens was the runaway. The cap must leave real room for an answer
-    while making that impossible."""
-    assert 4000 <= config.CHEAP_MAX_OUTPUT_TOKENS <= 32000
-    assert config.CHEAP_MAX_OUTPUT_TOKENS < 65537
+def test_the_cheap_cap_clears_the_observed_tail():
+    """
+    Sized off the measured distribution, not the mean. A legitimate
+    find_relevant_clippings over the full MOC catalog ran to 16,635 output
+    tokens; the runaway was 65,537. A ceiling between those is the whole design,
+    and an earlier 16,000 would have truncated real work.
+    """
+    assert config.CHEAP_MAX_OUTPUT_TOKENS > 16635      # clears known-good work
+    assert config.CHEAP_MAX_OUTPUT_TOKENS < 65537      # still bounds the runaway
 
 
 # ── Best-effort prior knowledge (the defence in depth) ───────────────────────────
