@@ -277,9 +277,10 @@ def _render_note(state: dict) -> str:
             )
         lines.append("")
 
-    lines += ["---", "",
-              "*Written by the watchdog. Live version: "
-              f"http://{_local_ip()}:{DASHBOARD_PORT}*"]
+    # Best address first — the tailnet one when Tailscale is up. This note is read
+    # on the phone, so a LAN-only link is dead exactly where it's needed most.
+    label, url = reachable_urls()[0]
+    lines += ["---", "", f"*Written by the watchdog. Live version: {url} ({label}).*"]
     return "\n".join(lines)
 
 

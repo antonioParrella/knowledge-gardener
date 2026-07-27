@@ -74,6 +74,15 @@ def test_run_titles_cannot_break_the_recent_runs_table():
     assert row.count("|") - row.count(r"\|") == 6         # 5 columns + closing pipe
 
 
+def test_note_links_the_best_reachable_address():
+    """
+    The note is read on the phone, so its link must be the address that works
+    from anywhere (the tailnet one when Tailscale is up), not the LAN-only one.
+    """
+    best = dashboard.reachable_urls()[0][1]
+    assert f"Live version: {best}" in _note()
+
+
 def test_queue_is_reported_when_work_is_waiting():
     telemetry.set_queue(clips=3, triggers=1, concepts=0)
     note = _note()
