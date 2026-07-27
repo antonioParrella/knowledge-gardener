@@ -39,6 +39,8 @@ from researcher import (
 from notes import read_note
 from pdf_processor import process_pdf, find_unprocessed_pdfs
 from llm import research_preflight
+import telemetry
+from dashboard import start_dashboard, write_vault_note
 
 # Serializes all pipeline work between the observer's event thread and the main
 # thread's periodic rescan. Without it, a research run writing source clips to
@@ -120,6 +122,7 @@ def _research_blocked() -> str | None:
     so it auto-resumes on a later rescan once the key limit is restored.
     """
     ok, reason = research_preflight()
+    telemetry.set_blocked(None if ok else reason)
     return None if ok else reason
 
 
@@ -279,6 +282,9 @@ def main():
     log.info(f"  Research → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/")
     log.info(f"  Concepts → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/ (concept: true)")
     log.info(f"  PDFs     → {PDF_INBOX_PATH}/")
+    url = start_dashboard()
+    if url:
+        log.info(f"  Dashboard → {url} (also mirrored to Index/_dashboard.md)")
     log.info("Press Ctrl+C to stop.")
     log.info("=" * 60)
 
@@ -297,6 +303,15 @@ def main():
             if time.time() - last_rescan >= RESCAN_INTERVAL_SECS:
                 last_rescan = time.time()
                 log.info("Periodic re-scan...")
+                # Queue depth is read off the same scans the rescan already does,
+                # so the dashboard costs no extra vault walk.
+                telemetry.set_queue(
+                    clips=len(find_unprocessed_clips(INBOX_PATH)),
+                    pdfs=len(find_unprocessed_pdfs(PDF_INBOX_PATH)),
+                    triggers=len(find_pending_triggers(TRIGGERS_PATH)),
+                    concepts=len(find_pending_concept_triggers(TRIGGERS_PATH)),
+                )
+                write_vault_note()
                 for path in find_unprocessed_clips(INBOX_PATH):
                     try:
                         log.info(f"Processing: {path.name}")
@@ -347,7 +362,9 @@ def main():
                         revert_stale_callouts([VAULT_PATH], STALE_CALLOUT_SECS)
                     # Callouts can live in ANY note in the vault — they're answered
                     # in place, like a review comment (see find_research_callouts).
-                    for cpath, ctopic, cdepth in find_research_callouts([VAULT_PATH]):
+                    callouts = find_research_callouts([VAULT_PATH])
+                    telemetry.set_queue(callouts=len(callouts))
+                    for cpath, ctopic, cdepth in callouts:
                         try:
                             log.info(f"Processing callout ({cdepth}): '{ctopic}' in {cpath.name}")
                             with PIPELINE_LOCK:
@@ -355,6 +372,9 @@ def main():
                         except Exception as e:
                             log.error(f"Callout error in {cpath.name}: {e}")
                         time.sleep(3)
+                # Second pass: the rescan may have emptied the queue and finished
+                # runs, so refresh the vault mirror with the post-work state.
+                write_vault_note()
     except KeyboardInterrupt:
         log.info("Stopping...")
         observer.stop()

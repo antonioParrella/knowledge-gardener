@@ -62,6 +62,7 @@ MyVault/
 ├── Index/            ← Agent-maintained knowledge base
 │   ├── _index.md     ← Master list of all MOCs
 │   ├── _tags.md      ← Canonical tag vocabulary (fed to tagging prompts)
+│   ├── _dashboard.md ← Pipeline status mirror (see Dashboard & Notifications)
 │   └── MOC - *.md    ← specific sub-fields, not broad domains
 └── _triggers/        ← Research/concept trigger notes (from iPhone)
 ```
@@ -105,6 +106,9 @@ obsidian_system/
     │   ├── callouts.py      ← inline `> [!research]` callouts answered in place
     │   └── concepts.py      ← concept extraction + explainer generation
     ├── pdf_processor.py     ← PDF text extraction + summarisation
+    ├── telemetry.py         ← Run state + spend ledger (what the dashboard reads)
+    ├── dashboard.py         ← Local web UI (:8765) + vault dashboard note
+    ├── notify.py            ← ntfy push notifications on run completion
     ├── obsidian_watchdog.py ← Main entry point, file system monitor
     ├── lint.py              ← Vault health checker (run periodically)
     └── (one-off scripts)    ← reset_clips, clean_junk_clips, consolidate_tags,
@@ -388,6 +392,10 @@ Provider exhaustion.
 Concept notes add no new routes: conceptualization runs on `moc`, the concept
 discovery loop reuses `research`, and the explainer reuses `synthesis`.
 
+Every OpenRouter request carries `usage: {include: true}`, so the response returns
+that call's real charge in `usage.cost`; the router books it against the task in
+`telemetry.py`, which is what makes per-report cost visible on the dashboard.
+
 ### Free Tier Limits
 
 | Resource        | Limit          | Notes  |
@@ -455,14 +463,17 @@ pytest -m llm         # Tier 3 only — real LLM, costs money, needs API keys
 
 | Tier | Folder | What | In default run? |
 |------|--------|------|-----------------|
-| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers | ✅ free, ~0.5s |
-| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked** | ✅ free, fast |
+| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the run ledger + dashboard note render | ✅ free, ~0.5s |
+| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, dashboard note + `/api/state` over HTTP | ✅ free, fast |
 | 3 | `tests/llm/` | **Real LLM calls** — the `usable` gate, citation repair, MOC granularity | ❌ opt-in (`-m llm`) |
 
 `tests/conftest.py` puts `src/` on `sys.path` and provides `tmp_vault` (monkeypatches
-the config path constants into every module that imported them). `tests/llm/` adds
-`require_openrouter` / `require_gemini_or_openrouter`, which skip cleanly when the
-key is absent.
+the config path constants into every module that imported them). It also has an
+**autouse** `isolate_telemetry` fixture that redirects the run ledger to a tmp dir
+and mutes ntfy for every test — without it, any test touching a pipeline function
+would write run state (and push notifications) from the live vault. `tests/llm/`
+adds `require_openrouter` / `require_gemini_or_openrouter`, which skip cleanly when
+the key is absent.
 
 **Reach for Tier 3 after touching a prompt or model route:** edit
 `clip_analysis.md`/`clip_system.md` → `test_usable_gate.py`; edit
@@ -524,9 +535,12 @@ motivated the rule).
 setx GEMINI_API_KEY "your-key-here"           # https://aistudio.google.com (no card)
 setx TAVILY_API_KEY "your-tavily-key"         # optional — https://tavily.com
 setx OPENROUTER_API_KEY "your-openrouter-key" # required for reports — https://openrouter.ai/keys
+setx NTFY_TOPIC "some-long-unguessable-name"  # optional — phone push notifications
 ```
 
-Restart the terminal after. `TAVILY_API_KEY` is optional (research falls back to
+Restart the terminal after. `NTFY_TOPIC` is any hard-to-guess string — ntfy.sh
+topics are public to anyone who knows the name, so treat it as the secret; unset
+means no notifications. `TAVILY_API_KEY` is optional (research falls back to
 academic sources without it). `OPENROUTER_API_KEY` is **required for research
 reports** — synthesis is OpenRouter-only, so without it a run gathers sources but the
 report fails and retries. The cheap `clip`/`moc` tasks run fine on free Gemini alone.
@@ -547,9 +561,10 @@ Edit `src/config.py` → set `VAULT_PATH` to your vault location.
 python src/obsidian_watchdog.py
 ```
 
-You should see the vault path and the watched routes (Clips → Clippings/, Research
-& Concepts → _triggers/). To auto-start on login, put a `.bat` that runs it into
-`shell:startup` (there's a `start.bat` launcher in the repo).
+You should see the vault path, the watched routes (Clips → Clippings/, Research
+& Concepts → _triggers/), and the dashboard URL to open on your phone. To
+auto-start on login, put a `.bat` that runs it into `shell:startup` (there's a
+`start.bat` launcher in the repo).
 
 ### 5. Web Clipper
 
@@ -571,6 +586,69 @@ tags: []
 ```
 
 ---
+
+## Dashboard & Notifications
+
+Three ways to see what the pipeline is doing. All read one source of truth —
+`telemetry.py`, which records run phases and per-call cost as the pipeline runs.
+Why a ledger rather than a log parser, and where the cost figures come from:
+DESIGN_NOTES § Telemetry.
+
+**Web dashboard** — the watchdog serves a live, read-only page on
+`http://<surface>:8765` from a daemon thread. Current run with a phase stepper
+and source-by-source progress, spend today / 7d / 30d, free-tier meters (Gemini
+calls/day, Tavily searches/month), OpenRouter credit remaining, share of spend by
+task, and the last 20 runs. Polls every 2s. Preview it without waiting for a real
+run:
+
+```
+python src/dashboard.py --demo     # seeded data on :8765, writes no real state
+```
+
+**Vault note** — the same state rendered into `Index/_dashboard.md` every rescan,
+so Obsidian Sync carries it to the phone with **no networking at all**. Refreshed
+only when something actually changed (an identical rewrite every 60s would push a
+file to the phone every minute). Use this when you're off the LAN and haven't set
+up Tailscale.
+
+**ntfy push** — set `NTFY_TOPIC` and finished research / concept / callout runs
+push to your phone (`"Research done — <title>", 8m32s · $0.83 · 41 model calls`).
+*Any* kind notifies on failure, including clips. Unset = off, and the pipeline
+behaves identically without it.
+
+Everything here is best-effort: telemetry swallows its own errors, the server runs
+in a daemon thread, and a failed note write is logged and dropped. Losing the
+dashboard never costs a run.
+
+### Phone access from anywhere (Tailscale)
+
+The dashboard binds to all interfaces, so a phone on the **same Wi-Fi** reaches it
+at `http://<surface-ip>:8765` (the watchdog logs the exact URL at start-up). There
+is no auth — keep it off untrusted networks. For access from anywhere, use
+Tailscale rather than port forwarding:
+
+1. Install Tailscale on the Surface (`winget install tailscale.tailscale`) and
+   sign in — this puts the machine on your private tailnet.
+2. Install the Tailscale app on the iPhone and sign in with the same account.
+3. Find the Surface's tailnet name in the app (e.g. `surface.tail1234.ts.net`).
+4. Open `http://surface.tail1234.ts.net:8765` on the phone, from any network.
+
+Nothing is exposed to the public internet and no ports are forwarded; the tailnet
+is a private WireGuard network between your own devices. Optionally run
+`tailscale serve https / http://localhost:8765` on the Surface for HTTPS with a
+real certificate.
+
+### Settings
+
+| Setting | Where | Default |
+|---|---|---|
+| `DASHBOARD_ENABLED` / `DASHBOARD_PORT` | `config.py` | `True` / `8765` |
+| `DASHBOARD_NOTE_PATH` | `config.py` | `Index/_dashboard.md` (`None` disables) |
+| `NTFY_TOPIC` / `NTFY_SERVER` | env | unset (off) / `https://ntfy.sh` |
+| `STATE_PATH` / `EVENTS_PATH` | `config.py` | beside `watchdog.log`, outside the vault |
+
+`dashboard_state.json` (live snapshot) and `events.jsonl` (append-only history of
+every run and LLM call) sit **beside the vault, not in it** — same rule as the log.
 
 ## Logs & Debugging
 

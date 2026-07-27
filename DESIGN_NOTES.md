@@ -402,3 +402,77 @@ handlers bound to the *real* stdout, then (2) redirects `sys.stdout`/`stderr` in
 the logger so every `print()` is persisted, timestamped, and flushed per line — the
 log is complete even if the process is killed mid-run. The log is
 `VAULT_PATH.parent/watchdog.log`, beside the vault, **not** in the repo.
+
+## Telemetry — why the dashboard needed a ledger, not a log parser
+
+Before this, the pipeline's only observable surfaces were `watchdog.log` (raw
+redirected stdout) and trigger frontmatter (`research: true|done`). Both answer
+"did it finish"; neither answers "what is it doing right now, how far in, and
+what has it cost". Two facts made a log-scraping dashboard the wrong build:
+
+- **Phase state is derivable from the log, but fragile.** The `[research]` prints
+  do mark the real boundaries, so a regex reader *works* — until a message is
+  reworded, at which point the dashboard silently reports the wrong stage. The
+  prints are diagnostics; treating them as an API freezes them.
+- **Cost is not in the log at all, and cannot be added to it.** No call site
+  ever saw a price. The only trustworthy per-call figure is the provider's own:
+  a token estimate can't know the reasoning surcharge or the cache discount.
+
+So `telemetry.py` records both directly, and the two presentations
+(`dashboard.py`: a local web page and a vault note) render `snapshot()` without
+deriving anything. Adding a number to the dashboard means recording it in
+telemetry, never computing it in a renderer.
+
+### Where cost actually comes from
+
+`usage: {include: true}` on every OpenRouter request makes the response carry
+`usage.cost` in real US dollars. That is the number the ledger books. Three
+consequences shaped the design:
+
+- **The provider knows the price; only the router knows the task.** A provider
+  can't label its own spend `synthesis` vs `research`. So providers *buffer* each
+  call's usage per-thread (`push_usage`) and `llm._run` drains it with the task
+  attached (`flush_usage`). The drain is in a `finally`, so a call that failed —
+  a truncated synthesis, a response the completeness gate rejected — still books
+  its cost. A failed run that spent $0.40 must not display as free.
+- **Gemini is booked at $0.00 but still counted.** The free tier costs nothing;
+  what constrains it is the 1,500 requests/day cap, so the meter tracks calls.
+- **Lifetime spend is free.** `research_preflight` already polls `GET /api/v1/key`
+  before every research run (§ Provider exhaustion); its `usage` field is the
+  key's lifetime charge, so the headline figure costs no extra API call.
+
+### Nested runs
+
+Phase ③ of a research run calls `clipper.process_clipped_note` for each queued
+source, and the clip pipeline opens its own `telemetry.run`. Naively that would
+evict the research run from the dashboard and replace it with a clip — the run
+you care about would vanish for most of its duration. `telemetry.run` therefore
+keeps a stack: an inner run only annotates the outer one's detail line and
+restores it on exit. Standalone clips, with an empty stack, get their own run.
+
+### Everything is best-effort
+
+Every public entry point in `telemetry.py` swallows its own exceptions, the web
+server runs in a daemon thread that logs and drops start-up failures, and a
+failed vault-note write is caught. Observability that can break the thing it
+observes is worse than none. The tests pin this down (`test_telemetry_failures_never_propagate`).
+
+### Two presentations, because neither covers the whole case
+
+The web page is live (2s polling) and rich, but needs the Surface reachable —
+home Wi-Fi, or Tailscale from anywhere. The vault note needs no networking at
+all: Obsidian Sync already carries notes to the phone. It is ~60s stale and plain
+markdown, which is exactly right for "is it done yet" from a train. The note is
+only rewritten when its rendered body actually changes — rewriting an identical
+note every rescan would have Sync pushing a file to the phone every minute
+forever.
+
+### State lives outside the vault
+
+`dashboard_state.json` and `events.jsonl` sit beside `watchdog.log`, not in the
+vault: they are the pipeline's bookkeeping, and inside the vault they would be
+synced, indexed, linted, and shown in search. The vault note is the *rendered*
+view, and it is the only telemetry artefact that belongs there. The ledger
+survives restarts (spend history would be meaningless otherwise), and a run
+still marked `running` in the file means the process was killed mid-flight — it
+is retired as `interrupted` on load rather than shown as live forever.
