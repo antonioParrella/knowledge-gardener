@@ -306,6 +306,34 @@ conversely, keep two different concepts that share a name apart by disambiguatin
 the new one's `term` (e.g. `Attention (machine learning)`). The residual is a true
 synonym the model still fails to connect from the gloss.
 
+### The extractor must read the whole report
+
+`_conceptualize` originally passed `report[:SYNTHESIS_RAW_EXCERPT]` to the
+`concept_extract` prompt. That constant is a **per-source** budget — it caps each of
+the dozen-odd sources stuffed into one synthesis prompt — and nothing about it
+suited a single finished report. At 15,000 chars it cut a comprehensive report
+roughly in half.
+
+The damage was invisible because the output looked reasonable: an audit of seven
+conceptualized reports (30k–55k chars of prose) found **not one** concept drawn from
+past ~15k. `Research - Stimulant Use in ADHD…` is the clearest case — its four picks
+(liability-threshold model, heritability, proportional hazards, Bayesian updating)
+all come from §1–2, the statistical sections, while the extractor never saw §4.3's
+dopamine hypothesis of schizophrenia, §4.4's sensitisation, or the whole of §5's
+pharmacology. It read like a topical bias in the model; it was a slice.
+
+Truncation also silently broke inline linking, since the prompt requires `mention`
+to be copied verbatim from the report text it was shown — a section the extractor
+never read can't yield a placeable mention.
+
+`_report_prose` now cuts at the trailing-apparatus boundary (the same
+`_TRAILING_SECTION_RE` inline linking uses) and applies its own
+`CONCEPT_REPORT_LIMIT` (60k). Dropping `## Sources` matters on its own: it is 7k+
+chars of paper titles in a comprehensive report — no concepts in it, and it is a
+dense list of precisely the paper-specific proper nouns the prompt tells the model
+not to pick. The remaining prose is ~8–14k tokens, which the cheap `moc`-tier model
+takes whole, so the limit is a runaway guard rather than a working ceiling.
+
 Concept generation deliberately uses the best model (`synthesis`, OpenRouter-only,
 no free-tier fallback) because the explainer's quality is what matters; the dedup
 guarantee is what stops this compounding, since each concept is paid for exactly

@@ -166,7 +166,16 @@ TAVILY_API_URL   = "https://api.tavily.com/search"
 # Upper bound on how many concepts the conceptualizer pass extracts from a single
 # research report — a cap on over-triggering, not a target. Each new concept fires
 # its own paid discovery+synthesis run, so keep this modest.
-MAX_CONCEPTS_PER_REPORT = 8
+MAX_CONCEPTS_PER_REPORT = 15
+# Max chars of a finished report's PROSE handed to the concept extractor. The
+# extractor has to see the whole argument — a concept it never reads is a concept it
+# can never pick, and it can't return the verbatim `mention` needed to link one
+# inline either. A comprehensive report runs 30-55k chars of prose (~8-14k tokens),
+# which the cheap moc-tier model swallows whole, so this is a runaway guard rather
+# than a working limit. Deliberately NOT SYNTHESIS_RAW_EXCERPT: that is a per-source
+# budget for a prompt carrying a dozen sources at once, and borrowing it here capped
+# the extractor at the first half of every report. See DESIGN_NOTES § Concept dedup.
+CONCEPT_REPORT_LIMIT = 60000
 
 # ── Research settings ─────────────────────────────────────────────────────────
 MAX_SEARCH_ITERATIONS  = 30    # max tool-call loops per research run (safety bound)

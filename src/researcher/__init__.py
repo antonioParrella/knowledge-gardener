@@ -44,8 +44,10 @@ from .concepts import (
     process_concept_trigger,
     find_pending_concept_triggers,
     _match_key,
+    _report_prose,
     _link_first_mention,
     _link_concepts_inline,
+    _append_concepts_section,
 )
 
 # Citation / completeness internals (referenced directly by the test suite)

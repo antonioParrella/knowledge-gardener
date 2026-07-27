@@ -506,6 +506,7 @@ sources (keeper chosen by `_clip_quality`, not age), orphan/duplicate MOC entrie
 | `clean_junk_clips.py` | Purge junk clips (raw-PDF byte dumps, bot-wall interstitials) saved before the `usable` gate, and fix MOCs. |
 | `consolidate_tags.py` | Unify drifted tags → canonical vocabulary. Proposes `tag_map.json`, apply after review. |
 | `fix_math_delimiters.py` | Rewrite LaTeX `\(…\)`/`\[…\]` → Obsidian `$…$`/`$$…$$` in reports written before the guard existed. |
+| `reconceptualize.py` | Re-extract concepts from reports conceptualized while the extractor only saw their first 15k chars. `--only <substr>` for one report. `--apply` queues paid generation runs — dry-run first. |
 
 These are one-time migrations, not part of the live pipeline — see the relevant
 DESIGN_NOTES section for what each was cleaning up.

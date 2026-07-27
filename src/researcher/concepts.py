@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from config import (
-    CONCEPTS_PATH, TRIGGERS_PATH, CLIP_CONTENT_LIMIT, SYNTHESIS_RAW_EXCERPT,
+    CONCEPTS_PATH, TRIGGERS_PATH, CLIP_CONTENT_LIMIT, CONCEPT_REPORT_LIMIT,
     MAX_CONCEPTS_PER_REPORT, load_prompt,
 )
 from notes import read_note, write_note, safe_filename, today, normalize_math_delimiters
@@ -114,6 +114,23 @@ _TRAILING_SECTION_RE = re.compile(
 )
 
 
+def _report_prose(report: str) -> str:
+    """
+    A report's argument, with its trailing apparatus cut off — what the concept
+    extractor should read.
+
+    Two reasons to strip at the same boundary inline linking uses. The ## Sources
+    list is dead weight for this task (7k+ chars of paper titles in a comprehensive
+    report) and actively misleading: it is a dense list of exactly the
+    paper-specific proper nouns the prompt tells the model NOT to pick. And keeping
+    it out of the budget means the char limit is spent on prose the model can
+    actually draw concepts from.
+    """
+    tail = _TRAILING_SECTION_RE.search(report)
+    prose = report[:tail.start()] if tail else report
+    return prose[:CONCEPT_REPORT_LIMIT]
+
+
 def _protected_spans(line: str) -> list[tuple[int, int]]:
     """Char ranges in a line that inline linking must not touch: existing wikilinks
     and inline code spans."""
@@ -183,10 +200,39 @@ def _link_concepts_inline(report: str, concepts: list[dict]) -> str:
     return "\n".join(lines) + tail
 
 
+# A trailing '## Concepts' heading together with its list items — matched so a
+# re-run can rewrite the section in place instead of appending a second one.
+_CONCEPTS_SECTION_RE = re.compile(
+    r"\n*^#{1,6}[ \t]+Concepts[ \t]*$\n(?:^[ \t]*-[ \t].*$\n?)*",
+    re.MULTILINE | re.IGNORECASE,
+)
+_CONCEPT_ENTRY_RE = re.compile(r"\[\[Concept - ([^\]|]+)")
+
+
 def _append_concepts_section(report: str, concepts: list[dict]) -> str:
-    """Append a trailing '## Concepts' list linking every picked concept — the
-    backstop so a concept whose inline mention couldn't be placed is never lost."""
-    entries = "\n".join(f"- [[Concept - {c['term']}]]" for c in concepts)
+    """
+    Write the trailing '## Concepts' list linking every picked concept — the backstop
+    so a concept whose inline mention couldn't be placed is never lost.
+
+    Idempotent: if the report already carries a '## Concepts' section (it was
+    conceptualized before), the section is rewritten with the union of what was
+    already listed and what this pass picked, rather than a second heading being
+    appended. That is what makes re-conceptualizing an existing report safe.
+    """
+    prior: list[str] = []
+    existing = _CONCEPTS_SECTION_RE.search(report)
+    if existing:
+        prior = [t.strip() for t in _CONCEPT_ENTRY_RE.findall(existing.group(0))]
+        report = report[:existing.start()] + report[existing.end():]
+
+    terms, seen = [], set()
+    for term in prior + [c["term"] for c in concepts]:
+        key = _concept_key(term)
+        if key and key not in seen:
+            seen.add(key)
+            terms.append(term)
+
+    entries = "\n".join(f"- [[Concept - {t}]]" for t in terms)
     return report.rstrip() + f"\n\n## Concepts\n{entries}\n"
 
 
@@ -228,14 +274,12 @@ def _write_concept_trigger(term: str, context: str, source_title: str) -> None:
     print(f"[concept] Queued concept trigger: {term}")
 
 
-def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
+def _extract_concepts(report: str) -> list[dict]:
     """
-    Read a finished research report, pick the foundational concepts worth their own
-    explainer note (one cheap moc-tier call), link them into the report body, and
-    queue concept triggers for the ones not already covered.
-
-    Best-effort throughout: bad/empty model output or a write hiccup leaves the
-    report as-is — concepts are additive and must never block a research run.
+    The extractor pass on its own: one cheap moc-tier call over the report's prose,
+    returning cleaned `{term, mention, context}` picks. Writes nothing — split out
+    from _conceptualize so reconceptualize.py can dry-run a report and show what it
+    would pick without touching the vault.
     """
     existing_glosses = _existing_concept_summaries()  # built concept term → one-line gloss
     existing = set(existing_glosses)                   # display terms of built concepts
@@ -247,7 +291,6 @@ def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
     canonical_by_match: dict[str, str] = {}
     for t in list(pending) + sorted(existing):
         canonical_by_match[_match_key(t)] = t
-    pending_keys = {_concept_key(t) for t in pending}
 
     # List existing concepts to the extractor WITH a one-line gloss, so it reuses the
     # note when it means the same thing and doesn't collide two distinct namesakes —
@@ -261,7 +304,7 @@ def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
         task="moc",
         prompt=load_prompt(
             "concept_extract",
-            report=report[:SYNTHESIS_RAW_EXCERPT],
+            report=_report_prose(report),
             existing_concepts=existing_block,
             max_concepts=str(MAX_CONCEPTS_PER_REPORT),
         ),
@@ -269,7 +312,7 @@ def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
     data = parse_json_response(raw)
     if not isinstance(data, list) or not data:
         print("[concept] No concepts extracted")
-        return
+        return []
 
     # Clean, dedup, and cap the picks. Snap each pick onto an existing concept's
     # canonical title when they name the same concept under different casing or
@@ -298,8 +341,27 @@ def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
         })
         if len(concepts) >= MAX_CONCEPTS_PER_REPORT:
             break
+    return concepts
+
+
+def _conceptualize(report_path: Path, report: str, report_title: str) -> None:
+    """
+    Read a finished research report, pick the foundational concepts worth their own
+    explainer note (one cheap moc-tier call), link them into the report body, and
+    queue concept triggers for the ones not already covered.
+
+    Safe to run twice on the same report (reconceptualize.py does exactly that): the
+    trailing ## Concepts section is rewritten as a union rather than duplicated, an
+    already-linked mention is skipped as a protected span, and a concept that already
+    exists is backlinked rather than regenerated.
+
+    Best-effort throughout: bad/empty model output or a write hiccup leaves the
+    report as-is — concepts are additive and must never block a research run.
+    """
+    concepts = _extract_concepts(report)
     if not concepts:
         return
+    pending_keys = {_concept_key(t) for t in _pending_concept_terms()}
 
     # Link every picked concept into the report (inline where the mention can be
     # placed cleanly; all of them into the trailing ## Concepts backstop list).
