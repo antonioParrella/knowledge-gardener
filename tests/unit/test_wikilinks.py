@@ -1,5 +1,5 @@
 """
-Tier 1 — citation-integrity helpers in researcher.py.
+Tier 1 — citation-integrity helpers in researcher/synthesis.py.
 
 These are the deterministic half of the "reports cite [[21]] instead of the real
 title" defense AGENTS.md describes. The LLM repair pass is Tier 3; the fused-link
