@@ -403,13 +403,49 @@ park a genuinely broken key as if a top-up would fix it.
 
 **Fix 2 — preflight the OpenRouter-only runs.** Research/concept/callout synthesis
 has *no* Gemini fallback, so gathering sources then dying at synthesis is pure
-waste. `llm.research_preflight()` polls the key's live `limit_remaining`
-(`GET /api/v1/key`) before a run and blocks it if credit is below
-`RESEARCH_MIN_KEY_CREDITS`. It blocks **only** on a confident low reading — an
-uncapped key, an unset key, or an unreachable `/key` all fail *open*, because a
-transient blip must not wedge all research (a real outage is still caught by the
-cooldown at call time). The reading is cached `PREFLIGHT_CACHE_SECS` so a rescan
-batch polls once, not per note.
+waste. `llm.research_preflight()` polls live spending power before a run and
+blocks it if credit is below `RESEARCH_MIN_KEY_CREDITS`. It blocks **only** on a
+confident low reading — an uncapped key, an unset key, or an unreachable endpoint
+all fail *open*, because a transient blip must not wedge all research (a real
+outage is still caught by the cooldown at call time). The reading is cached
+`PREFLIGHT_CACHE_SECS` so a rescan batch polls once, not per note.
+
+**Fix 3 — check the pool that actually pays.** Fix 2 shipped reading only
+`limit_remaining` from `GET /api/v1/key`. That is the key's *monthly spend cap* —
+and as the top of this section already noted, the cap is **independent of the
+account balance**. The gate was written knowing there were two pools and then
+watched only one of them.
+
+The failure it was built to prevent therefore happened anyway (2026-07-30). The
+key read a comfortable `limit: 40, limit_remaining: 27.84`, so preflight passed
+with confidence. Underneath, `GET /api/v1/credits` said
+`total_credits: 20, total_usage: 20.106` — a balance of **-$0.11**. A
+comprehensive L-theanine run gathered 22 sources over 28 minutes and died at
+synthesis on `402 – "You requested up to 32000 tokens, but can only afford 8774"`.
+The dashboard made it worse by rendering that same cap figure as "OpenRouter
+credit left: $28.10", so every surface agreed there was money when there wasn't.
+
+`account_balance()` now polls `/credits` and **both** pools must clear the floor.
+Each is judged only when its own reading is conclusive, so the fail-open property
+survives an outage of either endpoint; the cooldown clears only when every
+conclusive reading is solvent. The dashboard leads with the balance and labels the
+cap as a cap, because the two were indistinguishable on the page and that is what
+made the wrong number believable.
+
+*Lesson worth keeping:* a guard that reads a plausible-looking number from the
+wrong source is more dangerous than no guard. It converts "this might fail" into
+"this has been checked", and the run proceeds with more confidence, not less.
+
+**The Gemini free tier is much smaller than it looks.** The fallback that was
+supposed to absorb the OpenRouter outage was already spent. The real quota is
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, **20 requests per day per
+model** — not the 1,500 that `GEMINI_DAILY_LIMIT` claimed (that is the paid tier).
+A single comprehensive run exhausts it outright. The dashboard meter was drawn
+against 1,500, so it read `38 / 1500 — 2%` at the exact moment every Gemini model
+was returning 429 `RESOURCE_EXHAUSTED`. Two independent budget dials, both
+reporting healthy headroom, both wrong, at the same time. The counter aggregates all
+Gemini models while the quota is per model, so treat the meter as a floor: "at
+least this fraction of some model's daily quota is gone".
 
 **How the two reconcile, and how a run resumes.** The cooldown is a blind 30-min
 timer set on an actual failure; the preflight is a live reading. If they
@@ -464,10 +500,15 @@ consequences shaped the design:
   a truncated synthesis, a response the completeness gate rejected — still books
   its cost. A failed run that spent $0.40 must not display as free.
 - **Gemini is booked at $0.00 but still counted.** The free tier costs nothing;
-  what constrains it is the 1,500 requests/day cap, so the meter tracks calls.
+  what constrains it is the request cap, so the meter tracks calls. That cap is
+  **20/day per model**, not 1,500 — see § Provider exhaustion for the day both
+  budget meters read healthy while both budgets were gone.
 - **Lifetime spend is free.** `research_preflight` already polls `GET /api/v1/key`
-  before every research run (§ Provider exhaustion); its `usage` field is the
-  key's lifetime charge, so the headline figure costs no extra API call.
+  and `GET /api/v1/credits` before every research run (§ Provider exhaustion), so
+  the lifetime charge, the key's remaining cap, and the account balance all cost
+  no extra API call. Show the **balance** first: it is the pool that stops
+  research, and displaying only the cap is what made an overdrawn account read as
+  "$28.10 credit left".
 
 ### Nested runs
 
@@ -494,6 +535,28 @@ markdown, which is exactly right for "is it done yet" from a train. The note is
 only rewritten when its rendered body actually changes — rewriting an identical
 note every rescan would have Sync pushing a file to the phone every minute
 forever.
+
+**Both must start before any pipeline work, and the note must not be rendered by
+the main loop.** Originally `start_dashboard()` was called *after* the start-up
+backlog, and `write_vault_note()` only from the 60s rescan. Both presentations
+therefore went dark in exactly the situation you most want to watch: a restart
+that picks up a pending trigger drains the backlog before the loop ever begins, so
+nothing listens on 8765 and the note sits at whatever the *previous* process last
+wrote. Observed on 2026-07-30 as a 24-source, 28-minute run during which the page
+refused connections and the note still showed the aborted run that preceded it.
+
+Ordering alone isn't enough. Rescans don't happen while the main thread is inside
+a run, so a loop-driven note freezes through *any* long run, backlog or not. So
+`start_note_writer()` renders from its own daemon thread and `drain_backlog()` is
+called after both presentations are up. The unchanged-content skip means an idle
+pipeline still writes nothing, so decoupling the cadence costs no extra Sync
+traffic.
+
+*Corollary for anything that reads the ledger out-of-band:* `telemetry.load()`
+retires a `current` run whose status is `running` as `interrupted`, which is right
+at watchdog start-up and wrong from a second process. A helper that imports
+`telemetry` while the watchdog is mid-run will report the live run as dead — read
+`STATE_PATH` directly instead.
 
 ### State lives outside the vault
 
