@@ -166,7 +166,7 @@ TAVILY_API_URL   = "https://api.tavily.com/search"
 # Upper bound on how many concepts the conceptualizer pass extracts from a single
 # research report — a cap on over-triggering, not a target. Each new concept fires
 # its own paid discovery+synthesis run, so keep this modest.
-MAX_CONCEPTS_PER_REPORT = 15
+MAX_CONCEPTS_PER_REPORT = 8
 # Max chars of a finished report's PROSE handed to the concept extractor. The
 # extractor has to see the whole argument — a concept it never reads is a concept it
 # can never pick, and it can't return the verbatim `mention` needed to link one
