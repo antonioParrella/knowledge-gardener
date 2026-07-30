@@ -54,6 +54,64 @@ def test_write_failure_is_swallowed(tmp_path):
     dashboard.write_vault_note(tmp_path)                   # a directory, not a file
 
 
+def test_note_writer_thread_refreshes_without_the_main_loop(tmp_path, monkeypatch):
+    """
+    Regression: the note was only rendered from the main loop's rescan, so it
+    froze for the whole of any long run. Worst case was a restart with a pending
+    trigger — the backlog drained before the loop began, leaving the note showing
+    the *previous* process's last write while a 24-source run went by.
+
+    The writer thread must therefore keep rendering while the main thread is
+    blocked doing pipeline work.
+    """
+    import threading
+    import time
+
+    target = tmp_path / "_dashboard.md"
+    monkeypatch.setattr(dashboard, "DASHBOARD_NOTE_PATH", target)
+    dashboard.stop_note_writer()
+
+    written = threading.Event()
+    real_write = dashboard.write_vault_note
+
+    def _tracking(path=None):
+        real_write(path)
+        if target.exists():
+            written.set()
+
+    monkeypatch.setattr(dashboard, "write_vault_note", _tracking)
+
+    dashboard.start_note_writer(interval=0.05)
+    try:
+        # Stand in for the main thread being busy inside drain_backlog().
+        time.sleep(0.3)
+        assert written.is_set(), "note thread never rendered while main thread was busy"
+        assert "# Pipeline Dashboard" in target.read_text(encoding="utf-8")
+    finally:
+        dashboard.stop_note_writer()
+
+
+def test_note_writer_is_not_started_twice(monkeypatch, tmp_path):
+    """A second call must not spawn a competing writer for the same file."""
+    monkeypatch.setattr(dashboard, "DASHBOARD_NOTE_PATH", tmp_path / "_dashboard.md")
+    dashboard.stop_note_writer()
+    try:
+        dashboard.start_note_writer(interval=30)
+        first = dashboard._note_writer
+        dashboard.start_note_writer(interval=30)
+        assert dashboard._note_writer is first
+    finally:
+        dashboard.stop_note_writer()
+
+
+def test_note_writer_is_disabled_when_the_note_path_is_none(monkeypatch):
+    """DASHBOARD_NOTE_PATH = None turns the mirror off; no thread should start."""
+    monkeypatch.setattr(dashboard, "DASHBOARD_NOTE_PATH", None)
+    dashboard.stop_note_writer()
+    dashboard.start_note_writer(interval=30)
+    assert dashboard._note_writer is None
+
+
 def test_demo_binds_the_configured_host_not_loopback(monkeypatch):
     """
     Regression: the demo server bound 127.0.0.1, so the phone could never reach

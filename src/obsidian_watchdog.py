@@ -40,7 +40,9 @@ from notes import read_note
 from pdf_processor import process_pdf, find_unprocessed_pdfs
 from llm import research_preflight
 import telemetry
-from dashboard import start_dashboard, write_vault_note
+from dashboard import (
+    start_dashboard, start_note_writer, stop_note_writer, write_vault_note,
+)
 
 # Serializes all pipeline work between the observer's event thread and the main
 # thread's periodic rescan. Without it, a research run writing source clips to
@@ -147,7 +149,16 @@ def startup_checks():
     PDF_ARCHIVE_PATH.mkdir(parents=True, exist_ok=True)
     log.info(f"Ready: {PDF_INBOX_PATH}/")
 
-    # Process any backlog from previous sessions
+
+def drain_backlog():
+    """
+    Process anything left pending by a previous session.
+
+    Deliberately called AFTER the dashboard is up: a restart that picks up a
+    pending research trigger stays in here for the length of a full run, and
+    starting the presentations first is what makes that run watchable instead of
+    invisible.
+    """
     unprocessed = find_unprocessed_clips(INBOX_PATH)
     if unprocessed:
         log.info(f"Found {len(unprocessed)} unprocessed clip(s) from previous sessions")
@@ -282,11 +293,16 @@ def main():
     log.info(f"  Research → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/")
     log.info(f"  Concepts → {TRIGGERS_PATH.relative_to(VAULT_PATH)}/ (concept: true)")
     log.info(f"  PDFs     → {PDF_INBOX_PATH}/")
+    # Both presentations start before any pipeline work, so a backlog run is
+    # visible while it happens rather than only once it's over.
     url = start_dashboard()
     if url:
         log.info(f"  Dashboard → {url} (also mirrored to Index/_dashboard.md)")
+    start_note_writer(RESCAN_INTERVAL_SECS)
     log.info("Press Ctrl+C to stop.")
     log.info("=" * 60)
+
+    drain_backlog()
 
     handler = VaultHandler()
     observer = Observer()
@@ -311,7 +327,8 @@ def main():
                     triggers=len(find_pending_triggers(TRIGGERS_PATH)),
                     concepts=len(find_pending_concept_triggers(TRIGGERS_PATH)),
                 )
-                write_vault_note()
+                # The note itself is rendered by start_note_writer's thread, so it
+                # keeps updating through a long run instead of only between rescans.
                 for path in find_unprocessed_clips(INBOX_PATH):
                     try:
                         log.info(f"Processing: {path.name}")
@@ -372,11 +389,14 @@ def main():
                         except Exception as e:
                             log.error(f"Callout error in {cpath.name}: {e}")
                         time.sleep(3)
-                # Second pass: the rescan may have emptied the queue and finished
-                # runs, so refresh the vault mirror with the post-work state.
+                # Nudge the mirror immediately rather than waiting out the note
+                # thread's next tick: the rescan may have emptied the queue and
+                # finished runs, and that post-work state is what you want on the
+                # phone now. Unchanged content still writes nothing.
                 write_vault_note()
     except KeyboardInterrupt:
         log.info("Stopping...")
+        stop_note_writer()
         observer.stop()
 
     observer.join()

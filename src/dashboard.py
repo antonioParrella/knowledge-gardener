@@ -295,11 +295,54 @@ def _render_note(state: dict) -> str:
     return "\n".join(lines)
 
 
+_note_writer = None
+_note_writer_stop = threading.Event()
+
+
+def stop_note_writer() -> None:
+    """Signal the note thread to exit — used on shutdown and by tests."""
+    global _note_writer
+    _note_writer_stop.set()
+    _note_writer = None
+
+
+def start_note_writer(interval: float = 60.0) -> None:
+    """
+    Refresh the vault note on a daemon thread, independent of pipeline work.
+
+    The note used to be written only from the main loop's 60s rescan, which meant
+    it froze for the entire duration of any long run — the watchdog was busy
+    synthesising, not rescanning. Worst case was a restart with a pending trigger:
+    the backlog drained before the loop ever started, so the note sat at whatever
+    the *previous* process last wrote, for half an hour, while a 24-source run
+    went by unreported.
+
+    A thread decouples "what the pipeline is doing" from "when the note is
+    rendered". write_vault_note() already skips unchanged content, so an idle
+    pipeline still writes nothing and Obsidian Sync stays quiet.
+    """
+    global _note_writer
+    if DASHBOARD_NOTE_PATH is None or _note_writer is not None:
+        return
+
+    _note_writer_stop.clear()
+
+    def _loop():
+        while not _note_writer_stop.is_set():
+            write_vault_note()
+            # wait(), not sleep(), so a stop is honoured immediately instead of
+            # after a full interval.
+            _note_writer_stop.wait(interval)
+
+    _note_writer = threading.Thread(target=_loop, daemon=True, name="dashboard-note")
+    _note_writer.start()
+
+
 def write_vault_note(path: Path | None = None) -> None:
     """
     Mirror the dashboard into the vault, skipping the write when nothing changed.
 
-    The skip matters: this runs every 60s rescan, and rewriting an identical note
+    The skip matters: this runs on a 60s cadence, and rewriting an identical note
     would have Obsidian Sync pushing a file to the phone every minute forever.
     """
     target = path or DASHBOARD_NOTE_PATH

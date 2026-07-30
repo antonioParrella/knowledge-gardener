@@ -606,11 +606,17 @@ run:
 python src/dashboard.py --demo     # seeded data on :8765, writes no real state
 ```
 
-**Vault note** — the same state rendered into `Index/_dashboard.md` every rescan,
-so Obsidian Sync carries it to the phone with **no networking at all**. Refreshed
-only when something actually changed (an identical rewrite every 60s would push a
-file to the phone every minute). Use this when you're off the LAN and haven't set
-up Tailscale.
+**Vault note** — the same state rendered into `Index/_dashboard.md` on a 60s
+cadence by `start_note_writer()`'s own daemon thread, so Obsidian Sync carries it
+to the phone with **no networking at all**. Refreshed only when something actually
+changed (an identical rewrite every 60s would push a file to the phone every
+minute). Use this when you're off the LAN and haven't set up Tailscale.
+
+Both presentations start **before** `drain_backlog()`, and the note renders from a
+thread rather than the main loop, so a long run is watchable while it happens. Get
+this ordering wrong and a restart that picks up a pending trigger goes dark for the
+whole run — no page on the port, and a note frozen at the previous process's last
+write (DESIGN_NOTES § Telemetry).
 
 **ntfy push** — set `NTFY_TOPIC` and finished research / concept / callout runs
 push to your phone (`"Research done — <title>", 8m32s · $0.83 · 41 model calls`).
