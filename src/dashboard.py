@@ -253,8 +253,12 @@ def _render_note(state: dict) -> str:
     ]
     if key.get("usage") is not None:
         lines.append(f"| OpenRouter key, lifetime | ${key['usage']:.2f} |")
+    # Balance first: it's the pool that actually pays for calls, and the one whose
+    # exhaustion stops research dead.
+    if key.get("account_balance") is not None:
+        lines.append(f"| OpenRouter balance | ${key['account_balance']:.2f} |")
     if key.get("limit_remaining") is not None:
-        lines.append(f"| OpenRouter credit left | ${key['limit_remaining']:.2f} |")
+        lines.append(f"| OpenRouter key cap left | ${key['limit_remaining']:.2f} |")
     lines += [
         "",
         f"Gemini today {d['gemini_today']}/{d['gemini_limit']} {_meter(d['gemini_today'], d['gemini_limit'])}",
@@ -402,6 +406,7 @@ header { display:flex; align-items:flex-start; justify-content:space-between;
 .kpi .label { font-size:12px; color:var(--ink-2); }
 .kpi .value { font-size:30px; font-weight:600; letter-spacing:-.02em; margin:6px 0 2px; }
 .kpi .hero { font-size:44px; }
+.kpi .value.bad { color:var(--warning); }
 .kpi .foot { font-size:12px; color:var(--muted); }
 .meter { height:6px; border-radius:3px; background:var(--track);
          margin:10px 0 6px; overflow:hidden; }
@@ -607,13 +612,22 @@ function renderKpis(s) {
     <div class="value hero">${money(d.today.usd || 0)}</div>
     <div class="foot">${money(d.spend_7d)} last 7 days · ${money(d.spend_30d)} last 30</div></div>`);
 
+  if (key.account_balance != null) {
+    const bal = key.account_balance, low = bal < d.min_credits;
+    tiles.push(`<div class="kpi"><div class="label">OpenRouter balance</div>
+      <div class="value${low ? " bad" : ""}">${money(bal)}</div>
+      <div class="foot">${low
+        ? "below the research floor — synthesis will 402"
+        : "purchased credit · this is what pays for calls"}</div></div>`);
+  }
+
   if (key.usage != null) {
     const rem = key.limit_remaining, lim = key.limit;
-    tiles.push(`<div class="kpi"><div class="label">OpenRouter key</div>
+    tiles.push(`<div class="kpi"><div class="label">OpenRouter key cap</div>
       <div class="value">${money(key.usage)}</div>
       ${lim != null ? meter(key.usage, lim) : ""}
       <div class="foot">${rem != null
-        ? money(rem) + " credit left" + (rem < d.min_credits ? " — below the research floor" : "")
+        ? money(rem) + " of cap left" + (rem < d.min_credits ? " — below the research floor" : "")
         : "lifetime spend · no cap set"}</div></div>`);
   }
 
@@ -852,7 +866,7 @@ def _demo():
     spend["total_usd"] = round(sum(d["usd"] for d in spend["daily"]), 4)
     spend["by_task"] = {"synthesis": 8.42, "research": 2.61, "clip": 0.44, "moc": 0.12}
     spend["key"] = {"usage": 11.59, "limit": 15.0, "limit_remaining": 3.41,
-                    "checked": telemetry._iso()}
+                    "account_balance": 6.75, "checked": telemetry._iso()}
 
     for kind, title, status, secs, cost in [
         ("research", "Logical qubits and error correction, 2024-2025", "done", 512, 0.83),

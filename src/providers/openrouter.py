@@ -71,6 +71,43 @@ def key_status(timeout: float = 8.0) -> dict | None:
         return None
 
 
+def account_balance(timeout: float = 8.0) -> float | None:
+    """
+    Live purchased-credit balance via GET /api/v1/credits, in US dollars.
+
+    This is a DIFFERENT pool from the key's spend cap in `key_status()`, and it is
+    the one that actually pays for calls. A key can show plenty of `limit_remaining`
+    (its monthly cap) while the account underneath has nothing left, at which point
+    every request 402s with "requires more credits, or fewer max_tokens". Checking
+    only the cap is what let a comprehensive research run gather 22 sources and then
+    fail at synthesis with no warning.
+
+    Returns `total_credits - total_usage`, or None if the key is unset or the call
+    fails/parses badly — an *inconclusive* reading the caller must treat as
+    "don't block" rather than "no credit".
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"{OPENROUTER_BASE_URL}/credits",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data")
+        if not isinstance(data, dict):
+            return None
+        total = data.get("total_credits")
+        used = data.get("total_usage")
+        if total is None or used is None:
+            return None
+        return float(total) - float(used)
+    except Exception as e:
+        safe_print(f"[openrouter] credits check failed ({e}) — treating as inconclusive")
+        return None
+
+
 def _get_client():
     global _client
     if not OPENROUTER_API_KEY:

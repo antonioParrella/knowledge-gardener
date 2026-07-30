@@ -51,15 +51,24 @@ _preflight_cache: tuple[float, bool, str] | None = None
 
 def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[bool, str]:
     """
-    Gate an OpenRouter-only run (research / concept / callout synthesis) on the
-    key's live remaining credit. Returns (ok, reason); reason is "" when ok.
+    Gate an OpenRouter-only run (research / concept / callout synthesis) on live
+    spending power. Returns (ok, reason); reason is "" when ok.
 
-    Blocks ONLY on a confident low-credit reading. An unset key, a key with no
-    spend cap, or an unreachable /key endpoint all pass (fail-open) so a transient
-    blip can't wedge all research — a genuine outage is still caught by the
-    per-call cooldown at synthesis time. A reading that shows usable credit clears
-    any OpenRouter cooldown, so a just-raised limit resumes on the next rescan
-    instead of waiting out a stale 30-minute timer.
+    TWO pools have to be solvent, and they fail independently:
+
+      * the key's monthly spend cap (`/key` -> limit_remaining), and
+      * the account's purchased credit (`/credits` -> total_credits - total_usage).
+
+    Only the second actually pays for calls. Checking the cap alone is how a run
+    once passed preflight on a comfortable "$27.84 remaining" key, gathered 22
+    sources, and then 402'd at synthesis because the account balance was -$0.11.
+
+    Blocks ONLY on a confident low reading from either pool. An unset key, a key
+    with no spend cap, or an unreachable endpoint all pass (fail-open) so a
+    transient blip can't wedge all research — a genuine outage is still caught by
+    the per-call cooldown at synthesis time. A conclusive reading with both pools
+    solvent clears any OpenRouter cooldown, so a just-topped-up account resumes on
+    the next rescan instead of waiting out a stale 30-minute timer.
     """
     global _preflight_cache
     if min_credits <= 0:
@@ -69,24 +78,32 @@ def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[b
     if _preflight_cache and now < _preflight_cache[0]:
         return _preflight_cache[1], _preflight_cache[2]
 
-    from providers.openrouter import key_status
+    from providers.openrouter import key_status, account_balance
     status = key_status()
-    # Free headline number for the dashboard: this poll already happens before
-    # every research run, and its `usage` field is lifetime spend on the key.
-    telemetry.record_key_status(status)
+    balance = account_balance()
+    # Free headline numbers for the dashboard: these polls already happen before
+    # every research run, so the spend tiles cost no extra API call.
+    telemetry.record_key_status(status, balance)
+
+    # Each pool is checked only when its reading is conclusive; an absent reading
+    # is silence, not zero.
+    shortfalls = []
+    remaining = status.get("limit_remaining") if isinstance(status, dict) else None
+    if remaining is not None and remaining < min_credits:
+        shortfalls.append(f"key monthly cap ${remaining:.2f}")
+    if balance is not None and balance < min_credits:
+        shortfalls.append(f"account balance ${balance:.2f}")
 
     ok, reason = True, ""
-    if status is not None:
-        remaining = status.get("limit_remaining")
-        if remaining is not None and remaining < min_credits:
-            ok = False
-            reason = (
-                f"OpenRouter key credit ${remaining:.2f} < ${min_credits:.2f} required — "
-                f"research paused until the key limit is raised or usage resets"
-            )
-        else:
-            # Live evidence the key is usable (credit above threshold, or no cap).
-            _clear_cooldown("openrouter")
+    if shortfalls:
+        ok = False
+        reason = (
+            f"OpenRouter {' and '.join(shortfalls)} < ${min_credits:.2f} required — "
+            f"research paused until credit is topped up or the cap is raised"
+        )
+    elif status is not None or balance is not None:
+        # Live evidence the key is usable: every conclusive reading is solvent.
+        _clear_cooldown("openrouter")
 
     _preflight_cache = (now + PREFLIGHT_CACHE_SECS, ok, reason)
     return ok, reason

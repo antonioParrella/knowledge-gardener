@@ -368,21 +368,28 @@ def set_blocked(reason: str | None) -> None:
         pass
 
 
-def record_key_status(status: dict | None) -> None:
+def record_key_status(status: dict | None, balance: float | None = None) -> None:
     """
-    Store the live OpenRouter /key reading (cumulative spend + remaining credit).
+    Store the live OpenRouter readings: the /key spend cap and the /credits balance.
 
-    This is free: research_preflight already polls it before every research run,
-    so the dashboard's headline spend number costs no extra API call.
+    Both are kept because they fail independently and mean different things —
+    `limit_remaining` is the key's monthly cap, `account_balance` is the purchased
+    credit that actually pays for calls. Showing only the cap made the dashboard
+    report "$28.10 credit left" while the account was overdrawn.
+
+    This is free: research_preflight already polls both before every research run,
+    so the dashboard's headline spend numbers cost no extra API call.
     """
     try:
-        if not isinstance(status, dict):
+        if not isinstance(status, dict) and balance is None:
             return
+        status = status if isinstance(status, dict) else {}
         with _lock:
             _state["spend"]["key"] = {
                 "usage": status.get("usage"),
                 "limit": status.get("limit"),
                 "limit_remaining": status.get("limit_remaining"),
+                "account_balance": balance,
                 "checked": _iso(),
             }
             _persist()
