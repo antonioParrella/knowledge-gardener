@@ -31,7 +31,14 @@ import telemetry
 # Free-tier ceilings the meters are drawn against. Gemini's is per day and resets
 # ~midnight Pacific; Tavily's is per month. Both are the *free* plan's limits —
 # see AGENTS.md § Free Tier Limits.
-GEMINI_DAILY_LIMIT = 1500
+#
+# Gemini's real free-tier quota is per DAY *per model*, and it is small:
+# `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, quotaValue 20 for
+# gemini-3-flash. This read 1500 (the paid-tier figure) and so drew a 2% meter
+# on a quota that was already spent — one research run exhausts it. The counter
+# is across all Gemini models while the quota is per model, so treat the meter as
+# a floor: "at least this fraction of some model's daily quota is gone".
+GEMINI_DAILY_LIMIT = 20
 TAVILY_MONTHLY_LIMIT = 1000
 
 

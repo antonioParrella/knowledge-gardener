@@ -400,7 +400,7 @@ that call's real charge in `usage.cost`; the router books it against the task in
 
 | Resource        | Limit          | Notes  |
 |-----------------|----------------|--------|
-| Gemini requests | 1,500/day      | research is call-heavy; a few comprehensive runs can exhaust the free daily quota, then DeepSeek V4 Flash takes over |
+| Gemini requests | **20/day per model** | `GenerateRequestsPerDayPerProjectPerModel-FreeTier`. Tiny — a *single* comprehensive research run exhausts it, then DeepSeek V4 Flash takes over. (1,500/day is the paid-tier figure; the dashboard meter used to be drawn against it and read ~2% on a spent quota.) |
 | arXiv / OpenAlex| Unlimited      | Free, no key |
 | Tavily searches | ~1,000/month   | Free tier |
 | Obsidian Sync   | 1 GB (Standard)| ~32 MB used |

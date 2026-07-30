@@ -91,6 +91,39 @@ def test_queue_is_reported_when_work_is_waiting():
     assert "concepts" not in note.split("## Spend")[0].split("## Queue")[1]
 
 
+def test_gemini_meter_is_drawn_against_the_free_tier_quota():
+    """
+    The real free-tier cap is 20/day/model
+    (GenerateRequestsPerDayPerProjectPerModel-FreeTier), not the paid tier's 1,500.
+    Drawn against 1,500 the meter read 2% on a quota that was already spent, so a
+    run died on a 429 with no warning. Pin it so it can't drift back.
+    """
+    assert dashboard.GEMINI_DAILY_LIMIT == 20
+
+
+def test_note_shows_the_account_balance_not_just_the_key_cap():
+    """
+    The balance is the pool that pays for calls; the cap is a separate ceiling.
+    Reporting only the cap once showed "$28.10 credit left" on an overdrawn
+    account. Both must appear, distinctly labelled.
+    """
+    telemetry.record_key_status(
+        {"usage": 13.06, "limit": 40.0, "limit_remaining": 27.84}, balance=-0.11
+    )
+    note = _note()
+
+    assert "| OpenRouter balance | $-0.11 |" in note
+    assert "| OpenRouter key cap left | $27.84 |" in note
+
+
+def test_note_omits_the_balance_row_when_the_reading_is_inconclusive():
+    telemetry.record_key_status({"usage": 13.06, "limit": None, "limit_remaining": None})
+    note = _note()
+
+    assert "OpenRouter balance" not in note
+    assert "| OpenRouter key, lifetime | $13.06 |" in note
+
+
 def test_payload_is_json_serialisable():
     """The web dashboard ships this straight to the browser."""
     with telemetry.run("concept", "Reward Prediction Error"):
@@ -100,5 +133,5 @@ def test_payload_is_json_serialisable():
 
     json.dumps(payload)                                   # must not raise
     assert payload["current"]["elapsed"] >= 0
-    assert payload["derived"]["gemini_limit"] == 1500
+    assert payload["derived"]["gemini_limit"] == dashboard.GEMINI_DAILY_LIMIT
     assert "research" in payload["phases"]
