@@ -349,8 +349,8 @@ The watchdog writes the host note from a separate process, so several guards kee
 it from fighting live editing:
 
 - **Quiet gate.** `find_research_callouts` skips any note modified within
-  `CALLOUT_QUIET_SECS` (45s, < the 60s rescan) — a note you're actively typing in
-  is left alone and picked up once you pause.
+  `CALLOUT_QUIET_SECS` (120s) — a note you're actively typing in is left alone and
+  picked up on a later rescan once you pause.
 - **Robust write-back.** The final marker swap matches the in-progress line by topic
   with a tolerant regex (any depth label, any `.`/`…` form), so ellipsis or
   whitespace drift during the run can't miss it. If the marker was removed/edited
@@ -366,6 +366,100 @@ Depth is encoded in the callout *type* (`[!research-deep]` /
 `[!research-comprehensive]`) so it stays one-tap insertable and still renders as a
 normal callout (the question is the visible title). `_CALLOUT_RE` captures the
 suffix (`-` or `|` separator both accepted).
+
+---
+
+## Callout corrections — letting the answer edit the note
+
+A callout is often not a question but an objection. On the L-theanine report the
+callout read *"you need to reevaluate this and consider that caffeine might be the
+only thing doing anything…"* — a correct catch: the positive trials compared
+combination against placebo, never against caffeine alone. The answer agreed and
+demolished the claim. But the original claim stayed exactly where it was, three
+lines above, and was restated confidently thirty lines below. The report now
+contradicted itself twice, and a reader met the error, the correction, and the
+error again.
+
+Appending can't fix that. `corrections.py` runs a phase ⑤ that edits the note's own
+prose.
+
+### Why an exact-match edit tool, and not regeneration
+
+Handing the model the report and asking for a corrected version is the obvious
+approach and the wrong one here. It fails *silently and destructively*: a drifted
+sentence, a dropped `[[wikilink]]`, a truncation mid-document. This project already
+learned that lesson — `_assert_report_complete()` exists because synthesis silently
+truncated (§ Citation integrity), and regeneration reintroduces that risk on every
+correction while adding a new one: faithfully rewriting sections nobody asked about.
+
+Exact-match patching fails *loudly and safely*: no match, skip, report it. That
+matters more than expressive power because nobody is watching when this runs.
+
+So the mechanism is the one coding agents use — `edit_note(old_string, new_string,
+why)`, unique-match required, driven through the existing `llm_tool_loop`. The
+error strings are the whole design: a mismatched character becomes a loop iteration
+the model repairs, exactly as a coding agent recovers from a failed edit. This is
+also a heavily post-trained idiom, which an ad-hoc "replace block 14" format is not.
+
+### The model never touches disk
+
+`edit_note` mutates an in-memory working copy. `verify_edits` decides whether that
+copy is ever written, and a rejection discards the **whole set** — edits are
+all-or-nothing, so the note is never left half-corrected.
+
+### The gates are a weak substitute for a compiler, and that's the honest limit
+
+A coding agent leans on tests, a type checker, and a human reviewing the diff.
+None of those exist for prose. Nothing cheap can tell you a corrected paragraph is
+*worse* than the original — it will be fluent and well-cited either way. What the
+gates do catch is the model regenerating instead of patching:
+
+| Gate | Fatal? | Why |
+|---|---|---|
+| Heading structure changed | yes | It rewrote the skeleton — a misread of the task, and feedback doesn't fix a misread. |
+| Length below `CALLOUT_MIN_LENGTH_RATIO` | yes | Same failure, different symptom. |
+| Introduced an unresolvable `[[link]]` | no | Mechanical. Naming the dead link fixes it. |
+
+Only **newly introduced** links are validated. An early version checked every link
+in the note against the run's source titles, which flags every pre-existing citation
+in the report — the note is full of links that have nothing to do with this run.
+Dropping an existing link is allowed: removing a refuted claim legitimately removes
+its citation.
+
+`MAX_CORRECTION_ATTEMPTS` (2) bounds the retry after a *retryable* rejection, and
+each attempt restarts from a pristine copy so damage never compounds. The fatal
+kinds skip the retry entirely rather than buy a second expensive DeepSeek pass that
+was never going to differ. Everything is best-effort: any failure leaves the note
+unedited and the answer is appended as before, because correcting the note is an
+improvement on answering it, never a precondition.
+
+### Sentinels, and why the block format changed
+
+Prior answers are protected — they're a dated record of what was said. Finding them
+needs an exact terminator, and the old format (`> [!done]` line, loose prose, `---`
+rules) had none. Answer blocks are now wrapped in `<!-- kg:answer -->` /
+`<!-- /kg:answer -->`, invisible in Obsidian, making `_overlaps_protected` a regex
+instead of a heuristic.
+
+The same change fixed a second problem. Answers used to emit `## Sources` and `###`
+headings *inside* a host note, so the Israel–Palestine answer injected twelve
+`##`/`###` headings into the middle of section 5 — "What happened on 7 October" and
+"Synthesis" read as top-level report sections. Blocks now title at `####`, subhead
+at `#####`, and end with a one-line `**Sources:** [[A]], [[B]]`.
+
+The three pre-existing blocks were converted rather than supported alongside the new
+format: three blocks in two files is far less code than a compatibility path, and
+a one-shot throwaway script beat both. This is deliberately *not* in
+`src/` — the backfill scripts there exist for vault-wide migrations over hundreds of
+notes, and this was neither.
+
+### The question is restated, not echoed
+
+Callouts are typed on a phone, mid-thought. Rendering that verbatim as the answer's
+heading made the least-considered text on the page the loudest. `clean_question()`
+spends one cheap `moc`-tier call to restate it, keeps the original as an `*Asked:*`
+subtitle, and falls back to the raw text on any failure — including the no-call
+fast path when the question is already well formed.
 
 ---
 

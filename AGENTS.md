@@ -79,6 +79,7 @@ obsidian_system/
 │   ├── research_synthesis.md                    ← report synthesis (draft/revise)
 │   ├── research_critique.md                     ← comprehensive critique pass
 │   ├── research_callout.md                      ← inline [!research] callout answers
+│   ├── research_correct.md                      ← in-place correction of a callout's host note
 │   ├── research_repair_links.md                 ← resolves citations that aren't real titles
 │   ├── research_tags.md                         ← MOC summary + tags for a finished report
 │   ├── concept_extract.md / concept_system.md / concept_synthesis.md
@@ -101,6 +102,7 @@ obsidian_system/
     │   ├── __init__.py      ← public API facade (what the watchdog imports)
     │   ├── sources.py       ← ③ fetch a queued source → indexed clipping
     │   ├── synthesis.py     ← ④ write report + citation repair + completeness gate
+    │   ├── corrections.py   ← ⑤ correct the host note in place (callouts only)
     │   ├── pipeline.py      ← shared _run_research core + MOC index-entry helper
     │   ├── triggers.py      ← research trigger notes (_triggers/) + note naming
     │   ├── callouts.py      ← inline `> [!research]` callouts answered in place
@@ -196,11 +198,41 @@ Add `> [!research] your question` anywhere in **any** note. On the next rescan,
    into discovery and synthesis. Uses the `research_callout` prompt, so the agent
    answers the question *as it applies to that note* (resolving references like "our
    two options" against the note).
-4. Replaces the marker in place with a `> [!done]` callout followed by the findings
-   — appended inline like a review comment, no separate note created.
+4. **Corrects the host note in place** (`corrections.apply_corrections()`, phase ⑤)
+   — see below.
+5. Replaces the marker with the answer block, rendered by `render_answer_block()`
+   — inline like a review comment, no separate note created.
 
 **The answer is always DeepSeek V4 Pro, never Gemini** (synthesis is OpenRouter-only;
 only source *discovery* can fall back to Gemini, and it never writes the answer).
+
+**A callout is often an objection, not a question.** "This is wrong because…"
+answered by appending leaves the wrong claim standing above its own refutation, and
+the note ends up arguing with itself. So before the answer is written, phase ⑤
+offers the note for in-place correction: the model drives an exact-match
+`edit_note(old_string, new_string, why)` tool through `llm_tool_loop` — the same
+mechanism a coding agent uses, where a failed or ambiguous match is a loud error it
+repairs on the next iteration.
+
+Two properties make that safe to run unattended. **The model never touches disk** —
+it mutates an in-memory working copy, and `verify_edits()` decides whether that copy
+is ever written (heading structure preserved, note not collapsed below
+`CALLOUT_MIN_LENGTH_RATIO`, no invented `[[links]]`); a rejection discards the
+**whole set**. And **every failure is best-effort** — disabled, oversized, no edits
+wanted, gate rejection, or an outright crash all leave the note unedited and append
+the answer exactly as before. Correcting is an improvement on answering, never a
+precondition. A retryable rejection gets `MAX_CORRECTION_ATTEMPTS` (2) tries from a
+pristine copy each time; a structural one doesn't retry at all. Prior answer blocks
+are protected — they're a dated record. (Why exact-match over regeneration, and why
+the gates are a weak substitute for a test suite: DESIGN_NOTES § Callout corrections.)
+
+**The answer block** is delimited by `<!-- kg:answer -->` sentinels (invisible in
+Obsidian, an exact anchor for the protected-span check). `clean_question()` restates
+a hastily-typed question as the heading and keeps the original as an `*Asked:*`
+subtitle; corrected passages are listed verbatim in a foldable `> [!quote]-` block
+so nothing is silently lost. Headings sit at `####` (answer subheads at `#####`) and
+sources are a one-line `**Sources:** [[A]], [[B]]`, so an inline annotation never
+competes with the host note's outline.
 
 **Per-callout depth** is encoded in the callout *type* so it stays one-tap
 insertable and still renders as a normal callout:
@@ -368,9 +400,9 @@ in turn, falling through on quota exhaustion or provider errors.
 | Task (call site) | Primary | Fallback |
 |------------------|---------|----------|
 | `clip` — clip/PDF summaries (`clipper.py`, `pdf_processor.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
-| `moc` — MOC assignment + relevance + concept extract (`indexer.py`, `concepts.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
+| `moc` — MOC assignment + relevance + concept extract + question restatement (`indexer.py`, `concepts.py`, `callouts.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
 | `research` — discovery tool loop only (`pipeline.py`, `concepts.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
-| `synthesis` — the report: draft/critique/revise/repair (`synthesis.py`, `concepts.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | **none — OpenRouter only** |
+| `synthesis` — the report: draft/critique/revise/repair, and the correction loop (`synthesis.py`, `concepts.py`, `corrections.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | **none — OpenRouter only** |
 
 The report itself (`synthesis`) runs on DeepSeek V4 Pro at `reasoning={"effort":
 "xhigh"}` with an explicit `max_tokens` (`RESEARCH_MAX_OUTPUT_TOKENS`) and has **no
@@ -463,7 +495,7 @@ pytest -m llm         # Tier 3 only — real LLM, costs money, needs API keys
 
 | Tier | Folder | What | In default run? |
 |------|--------|------|-----------------|
-| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the run ledger + dashboard note render | ✅ free, ~0.5s |
+| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the callout edit contract + correction gates, the run ledger + dashboard note render | ✅ free, ~0.5s |
 | 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, dashboard note + `/api/state` over HTTP | ✅ free, fast |
 | 3 | `tests/llm/` | **Real LLM calls** — the `usable` gate, citation repair, MOC granularity | ❌ opt-in (`-m llm`) |
 
@@ -477,6 +509,7 @@ the key is absent.
 
 **Reach for Tier 3 after touching a prompt or model route:** edit
 `clip_analysis.md`/`clip_system.md` → `test_usable_gate.py`; edit
+`research_correct.md` or the edit-tool schema → `test_callout_corrections.py`; edit
 `research_repair_links.md` or synthesis routing → `test_citation_integrity.py`; edit
 the MOC-assignment prompt → `test_moc_granularity.py`.
 

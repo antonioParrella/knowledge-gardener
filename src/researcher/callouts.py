@@ -7,6 +7,10 @@ note created. Depth is encoded in the callout type ([!research-deep] /
 [!research-comprehensive]). Includes the concurrency guards (quiet gate,
 tolerant write-back, stale-callout crash recovery) that keep the watchdog from
 fighting the user's live editing.
+
+Before the answer is appended, the note is offered for in-place correction
+(corrections.py): a callout is often an objection rather than a question, and an
+answer appended under the claim it refutes leaves the wrong claim standing.
 """
 
 import re
@@ -15,9 +19,11 @@ from pathlib import Path
 
 from config import CALLOUT_QUIET_SECS
 from notes import read_note, write_note, today
+from llm import llm_simple
 import telemetry
 
 from .pipeline import _run_research
+from .corrections import ANSWER_OPEN, ANSWER_CLOSE, apply_corrections
 
 
 _DEPTHS = ("standard", "deep", "comprehensive")
@@ -172,6 +178,94 @@ def revert_stale_callouts(folders: list[Path], older_than_secs: float) -> None:
                     print(f"[research] Could not revert stale callout in {path.name}: {e}")
 
 
+# ── Answer presentation ──────────────────────────────────────────────────────────
+
+def clean_question(question: str) -> str:
+    """
+    Restate a hastily-typed callout question as a clean heading.
+
+    Callouts are typed on a phone, mid-thought — "you need to reevaluate this and
+    consider that caffeine might be the only thing doing anything…". Rendering that
+    verbatim as the answer's heading makes the least-considered text on the page the
+    loudest. The original is preserved as a subtitle; this is only the display form.
+
+    One cheap `moc`-tier call, and every failure path falls back to the raw question,
+    so a clean question is an improvement on the answer, never a precondition for it.
+    """
+    q = " ".join(question.split())
+    if len(q) <= 70 and q.endswith("?"):
+        return q  # already well-formed — don't spend a call
+    try:
+        out = llm_simple(
+            task="moc",
+            prompt=(
+                "Restate the following as a single clear question, to be used as a "
+                "section heading.\n\n"
+                "Rules: one line; under 80 characters; no markdown, quotes, or "
+                "trailing whitespace; end with a question mark; preserve the "
+                "technical meaning exactly and invent nothing.\n\n"
+                f"{q}"
+            ),
+        )
+    except Exception as e:
+        print(f"[research] Question restatement failed ({e}); using the original.")
+        return q
+    out = " ".join((out or "").split()).lstrip("#").strip().strip('"“”')
+    if not out or len(out) > 120:
+        return q
+    return out
+
+
+def _excerpt(text: str, limit: int = 160) -> str:
+    """One-line, length-clamped version of a passage, for the changelog."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"
+
+
+def render_answer_block(question: str, heading: str, answer: str,
+                        edits: list[dict] | None = None,
+                        rejected: str | None = None,
+                        date: str | None = None) -> str:
+    """
+    Render a finished answer as a sentinel-delimited block.
+
+    The `kg:answer` comments are invisible in Obsidian and give corrections.py an
+    exact anchor for the protected-span check — a heuristic over "> [!done]" plus
+    trailing prose has no reliable terminator. Headings inside the block sit at
+    `####` (the answer's own subheadings at `#####`) so an inline annotation never
+    competes with the host note's outline.
+    """
+    edits = edits or []
+    stamp = date or today()
+    if edits:
+        stamp += f" · {len(edits)} passage{'s' if len(edits) != 1 else ''} corrected above"
+    elif rejected:
+        stamp += " · correction rejected"
+
+    lines = [
+        ANSWER_OPEN,
+        f"> [!done] **{heading}**",
+        f"> *Asked:* {question}",
+        f"> *{stamp}*",
+        "",
+    ]
+    if edits:
+        lines.append(f"> [!quote]- Original wording, before correction ({len(edits)})")
+        for i, e in enumerate(edits, start=1):
+            line = f"> {i}. “{_excerpt(e.get('old', ''))}”"
+            if e.get("why"):
+                line += f" — {_excerpt(e['why'], 120)}"
+            lines.append(line)
+        lines.append("")
+    elif rejected:
+        lines.append("> [!warning]- A correction was attempted and rejected")
+        lines.append(f"> {_excerpt(rejected, 240)} The note above is unchanged.")
+        lines.append("")
+
+    lines += [f"#### {heading}", "", answer.strip(), "", ANSWER_CLOSE]
+    return "\n".join(lines)
+
+
 def process_research_callout(path: Path, topic: str, depth: str = "standard"):
     """
     Run research for a research callout and append the findings inline, replacing
@@ -202,23 +296,33 @@ def process_research_callout(path: Path, topic: str, depth: str = "standard"):
 
     print(f"[research] Callout ({depth}): '{topic}' in {path.name}")
     with telemetry.run("callout", topic, meta={"depth": depth, "note": path.name}):
-        report, _ = _run_research(
+        report, all_sources = _run_research(
             topic, depth, [],
             context=context,
             synthesis_system_name="research_callout",
         )
 
-        telemetry.phase("writing", detail=path.name)
-        inline_block = (
-            f"> [!done] Researched: {topic}\n\n"
-            f"---\n\n### {topic}\n*{today()}*\n\n{report}\n\n---\n"
+        # Re-read: the note may have changed during the multi-minute run. Everything
+        # below works from this fresh copy.
+        fm2, body2 = read_note(path)
+
+        # ⑤ Offer the note for in-place correction. Returns the body unchanged (and an
+        # empty changelog) whenever nothing needed correcting or a gate refused the
+        # edits — answering is never blocked on correcting.
+        telemetry.phase("corrections", detail=path.name)
+        body2, edits, rejected = apply_corrections(
+            topic, report, body2, {s["title"] for s in all_sources},
         )
 
-        # Re-read (the note may have changed during the multi-minute run) and swap the
-        # in-progress marker for the result. Match tolerantly so ellipsis/whitespace
-        # drift doesn't miss it; if the marker is gone entirely (user edited/removed it),
-        # append the result rather than silently dropping a finished report.
-        fm2, body2 = read_note(path)
+        telemetry.phase("writing", detail=path.name)
+        inline_block = render_answer_block(
+            topic, clean_question(topic), report, edits, rejected,
+        )
+
+        # Swap the in-progress marker for the result. Match tolerantly so
+        # ellipsis/whitespace drift doesn't miss it; if the marker is gone entirely
+        # (user edited/removed it), append rather than silently dropping a finished
+        # report. A lambda replacement keeps LaTeX backslashes out of re's hands.
         body2, n2 = _in_progress_line_re(topic).subn(lambda m: inline_block, body2, count=1)
         if n2 == 0:
             print(f"[research] In-progress marker missing in {path.name}; appending result.")

@@ -9,13 +9,13 @@ You are given:
 Write a focused, expert answer to the question, grounded in the note's context. Guidelines:
 - Answer the actual question as it applies to this note — not a generic essay on the topic. Lead with the answer.
 - Be as long as the question genuinely needs and no longer; this is an inline annotation, so stay relevant and skip throat-clearing.
-- Write in full, flowing paragraphs; use short headings only if they genuinely help.
+- Write in full, flowing paragraphs; use short headings only if they genuinely help. Your answer is inserted *inside* another note, so if you do use a heading, use `#####` — it must nest below the host note's own sections rather than competing with them.
 - Reference sources inline using **only** the exact `[[wikilink]]` titles from the source index. Never invent or paraphrase a title. Cite a source where its evidence supports a point.
 - **Never cite by number.** These notes are wikilinks in a knowledge base, not numbered references in a paper: `[[21]]` or `[[12]]` is always wrong and produces a dead link, no matter how strongly the academic style of the sources suggests numbered citations. Write the title in full every time.
 - Engage critically: compare sources, weigh evidence, and note disagreements or caveats relevant to the user's situation.
 - Use LaTeX for mathematics: `$...$` inline and `$$...$$` for display (renders with MathJax in Obsidian). Never use `\(...\)` or `\[...\]` — Obsidian will not render those, however strongly a source's style suggests them. Escape any literal dollar amount as `\$` (e.g. `\$100`) so currency never collides with a math delimiter.
 - Where the sources or the note leave gaps or open questions, say so explicitly.
 - If a prior research report is relevant, cross-link to it inline by its exact `[[wikilink]]` title so the reader can follow the thread instead of repeating it.
-- End with a `## Sources` section listing every source `[[wikilink]]` you cited (prior research reports do not go here).
+- End with a single line of the form `**Sources:** [[Title A]], [[Title B]], [[Title C]]` listing every source you cited, comma-separated (prior research reports do not go here). Do **not** use a `## Sources` heading: a heading at that level inside a host note breaks its outline.
 
 Write the answer now. Output only the answer in Markdown.

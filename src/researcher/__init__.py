@@ -11,12 +11,13 @@ Four phases (shared core in pipeline.py):
   ④ Synthesise a long report (draft, or draft→critique→revise for comprehensive)
 
 Module map:
-  sources.py    ③ fetch a queued source → indexed clipping (shared)
-  synthesis.py  ④ write the report + citation repair + completeness gate (shared)
-  pipeline.py   the shared _run_research core + MOC index-entry helper
-  triggers.py   research trigger notes (_triggers/, research: true) + naming
-  callouts.py   inline `> [!research]` callouts answered in place
-  concepts.py   concept extraction + explainer generation (the learning layer)
+  sources.py     ③ fetch a queued source → indexed clipping (shared)
+  synthesis.py   ④ write the report + citation repair + completeness gate (shared)
+  corrections.py ⑤ correct the host note in place (callouts only)
+  pipeline.py    the shared _run_research core + MOC index-entry helper
+  triggers.py    research trigger notes (_triggers/, research: true) + naming
+  callouts.py    inline `> [!research]` callouts answered in place
+  concepts.py    concept extraction + explainer generation (the learning layer)
 
 This package's public API — what the watchdog imports — is re-exported below, so
 `from researcher import process_research_trigger` and `researcher.<name>` keep
@@ -37,6 +38,21 @@ from .callouts import (
     find_research_callouts,
     process_research_callout,
     revert_stale_callouts,
+    clean_question,
+    render_answer_block,
+)
+
+# In-place correction of the callout's host note (internals used by the test suite)
+from .corrections import (
+    ANSWER_OPEN,
+    ANSWER_CLOSE,
+    Rejection,
+    apply_corrections,
+    edit_note,
+    execute_tool,
+    get_edits,
+    reset_edits,
+    verify_edits,
 )
 
 # Concept notes

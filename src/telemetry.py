@@ -45,7 +45,7 @@ PHASES = {
     "research": ["prior-knowledge", "discovery", "sources", "synthesis",
                  "citations", "indexing", "concepts"],
     "callout":  ["prior-knowledge", "discovery", "sources", "synthesis",
-                 "citations", "writing"],
+                 "citations", "corrections", "writing"],
     "concept":  ["prior-knowledge", "discovery", "sources", "synthesis", "indexing"],
 }
 

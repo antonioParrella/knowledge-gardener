@@ -193,6 +193,20 @@ CALLOUT_QUIET_SECS     = 120
 # its run crashed or OpenRouter was down. It's reverted to "> [!research]" and retried.
 STALE_CALLOUT_SECS     = 1800  # 30 min
 
+# ── Inline callout corrections ────────────────────────────────────────────────
+# When a callout's answer contradicts the note it lives in, the note's own prose is
+# corrected in place rather than left standing above a rebuttal. The model never
+# touches disk: it mutates an in-memory working copy through an exact-match edit
+# tool, and the gates below decide whether that copy is ever written.
+CALLOUT_EDITS_ENABLED    = True
+MAX_CALLOUT_EDITS        = 6      # per run; beyond this it's a rewrite, not a correction
+MAX_CORRECTION_ATTEMPTS  = 2      # whole-edit-set retries after a gate rejection
+CALLOUT_MIN_LENGTH_RATIO = 0.6    # reject an edit set that shrinks the note below this
+# A note larger than this is not offered for correction at all: the model would be
+# patching a view it can only partly see, and a partial view invites "fixing" the
+# apparent truncation. The answer is still appended as normal.
+CORRECTION_DOC_LIMIT     = 150000
+
 # ── Prompt files ───────────────────────────────────────────────────────────────
 PROMPTS_PATH = Path(__file__).parent.parent / "prompts"
 
