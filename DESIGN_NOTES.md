@@ -186,6 +186,94 @@ are reported, not auto-edited (report prose is the user's).
 
 ---
 
+## Full-text recovery — the open-access ladder
+
+The `usable` gate above keeps garbage *out*. This is the opposite problem: real,
+freely-available articles that never got *in*.
+
+**The measurement.** 299 of 650 research-gathered clips (46%) were `full_text:
+false`. That is not a paywall story. The failed-source domains were led by
+`pmc.ncbi.nlm.nih.gov` (24) — PubMed Central, which is 100% open access — plus 17
+bare `doi.org` links and 6 arXiv URLs. A random 30-clip sample was probed against
+nine candidate retrieval strategies and each result *graded*, not counted:
+
+| route | good | thin | wrong | precision |
+|---|---|---|---|---|
+| Europe PMC `fullTextXML` | 5 | 0 | 0 | **100%** |
+| NCBI BioC (PMC OA) | 5 | 0 | 0 | **100%** |
+| browser User-Agent retry | 4 | 1 | 2 | 57% |
+| Unpaywall → OA copy | 2 | 2 | 0 | 50% |
+| OpenAlex `locations[]` | 3 | 4 | 0 | 43% |
+| title → identifier | 1 | 0 | 3 | 25% |
+| reader proxy (Jina) | 2 | 3 | 4 | 22% |
+
+Grading mattered enormously. Counting bytes would have scored the bottom two rows
+as successes: they returned a 404 page rendered as prose, a publisher homepage, and
+— for an L-theanine meta-analysis — a PubMed page about *splanchnic nerve anatomy*.
+
+**Four causes, in order of how much they cost.**
+
+1. **The pipeline threw away identifiers it already held.** `queue_source()` kept
+   only the URL, while the search result that produced it knew the DOI. 55% of the
+   failed clips carry no identifier in their URL at all, so they can only be
+   re-resolved by title search — the 25%-precision route. `queue_source` now takes
+   `doi` / `landing_url`, `_format_academic_results` shows the DOI so the agent can
+   pass it on, and `_clip_source` persists whatever was resolved into frontmatter.
+   Every clip written from here on stays cheaply recoverable, *including* the
+   abstract-only ones.
+2. **The landing-page fallback was unreachable.** `_process_source` called
+   `extract_paper_text(url, landing_url=url)`, and the guard added for the
+   byte-dump bug (§ Rejecting non-content, layer 2) is `landing_url != pdf_url` —
+   always false. Every `kind="pdf"` source whose download failed had *no* fallback.
+3. **PMC is bot-walled at the HTML door and wide open at the API door.** Both
+   100%-precision routes are free and key-less.
+4. **A bot User-Agent gets 403'd** by many publishers. Left alone deliberately —
+   that is a separate call about how hard to push on publishers, not part of this
+   ladder.
+
+**Why precision is the binding constraint.** The `usable` gate asks "is this
+content?", not "is this *THE* content." A wrong-but-plausible paper passes it
+cleanly and ends up cited in a report — a failure far worse than the thin clip it
+replaced, because it is invisible. So the ladder is ordered by *measured* precision
+and the bottom two rows are simply not implemented. Recall is cheap to buy here and
+not worth what it costs.
+
+**Two gates, and the trust rule.** `retrieve()` walks the routes in table order and
+each candidate must clear:
+
+- **Identity** — the fraction of the abstract's key terms present in the retrieved
+  text. Over 38 graded retrievals: genuine full text scored min 80% / median 95%,
+  wrong documents min 0% / median 33%. At the 0.75 threshold every genuine full text
+  survived and 7 of 8 wrong documents were rejected. Lexical and free, so it can sit
+  in front of every route without a cost argument.
+- **Structure** — at least 3 distinct article section names. A repository landing
+  page quotes the abstract verbatim, so it scores ~100% on identity while being
+  nothing but that abstract wrapped in institutional chrome. Accepting one would
+  *downgrade* the clip: a clean abstract-only note replaced by the same abstract
+  plus a cookie banner. Genuine full texts carried 5-9 sections, landing pages 0-2.
+  Checked inside the per-location loops too, so a landing page listed first can't
+  mask a real PDF listed second.
+
+A route keyed by an identifier read off the URL (`Candidate.trusted`) skips both:
+Europe PMC's full text for a PMCID *is* the right document and *is* full text by
+construction, and gating it could only add false rejections. The one wrong document
+that survives the gate is a topically near-identical paper, which lexical matching
+cannot separate — that is the honest residual, and it is why the untrusted routes
+sit below the trusted ones rather than beside them.
+
+**What it actually recovers.** Re-run against the same 30 real URLs, the shipped
+ladder recovers 10 — exactly the subset the graded exploration attributed to these
+routes, with nothing lost between prototype and implementation. The remaining
+misses are dominated by `no identifiers`: legacy clips from before cause 1 was
+fixed. New runs start from a DOI, so they begin further up the ladder.
+
+Everything is best-effort. `retrieve()` never raises, `_process_source` wraps it
+anyway, and any failure falls through to the abstract-only clip that would have
+been written regardless. The ladder can only add recoveries; it can never take a
+working path away.
+
+---
+
 ## Duplicate prevention — the overnight-duplicates origin
 
 `clipper.py` checks for existing notes with the same `source` URL before processing

@@ -207,6 +207,34 @@ CALLOUT_MIN_LENGTH_RATIO = 0.6    # reject an edit set that shrinks the note bel
 # apparent truncation. The answer is still appended as normal.
 CORRECTION_DOC_LIMIT     = 150000
 
+# ── Open-access full-text recovery ────────────────────────────────────────────
+# A queued source arrives as one URL, and that URL is often the worst way to reach
+# the document (a 403ing publisher PDF path, a bot-walled PMC page, a DOI that
+# redirects to a paywall) while the same article sits in a free key-less API. The
+# ladder in fulltext.py derives identifiers from the URL and walks the OA routes in
+# descending order of MEASURED precision. Set False to fall back to the old
+# single-shot behaviour (download the URL, else abstract-only).
+FULLTEXT_ENABLED = True
+# Sent to Unpaywall / OpenAlex / NCBI, all of which ask for a contact address and
+# give politer rate limits when they get one.
+FULLTEXT_CONTACT_EMAIL = "parrella17@gmail.com"
+# The identity gate. An inferred route (an OA location we followed, not an identifier
+# read off the URL) can return a *plausible wrong document* — a different paper on the
+# same topic, or a 404 page rendered as prose — and the clipper's `usable` gate asks
+# "is this content?", not "is this THE content?", so a wrong document sails through it
+# and gets cited. The gate scores the retrieved text against the source's abstract.
+#
+# Calibrated on 38 graded retrievals over a random sample of the vault's own
+# abstract-only clips: genuine full text scored min 80% / median 95%, wrong documents
+# min 0% / median 33%. At 0.75 every genuine full text survived and 7 of 8 wrong
+# documents were rejected. Raise it to trade recall for precision; the residual miss
+# is a topically near-identical paper, which lexical matching cannot separate.
+FULLTEXT_IDENTITY_THRESHOLD = 0.75
+# Floor for "this is a document, not a stub". Below this a candidate is a landing
+# page or an abstract, which we already have — so it is not an improvement.
+FULLTEXT_MIN_CHARS = 6000
+FULLTEXT_TIMEOUT_SECS = 30
+
 # ── Prompt files ───────────────────────────────────────────────────────────────
 PROMPTS_PATH = Path(__file__).parent.parent / "prompts"
 

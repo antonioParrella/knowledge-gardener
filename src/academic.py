@@ -115,12 +115,18 @@ def search_openalex(query: str, max_results: int = 8) -> list[dict]:
             a.get("author", {}).get("display_name", "")
             for a in work.get("authorships", [])
         ]
+        # The DOI is surfaced as its own field, not just buried in landing_url: it is
+        # the key the OA ladder needs to find a free copy when pdf_url is absent or
+        # paywalled, and the discovery agent can only pass on what it is shown.
+        doi = (work.get("doi") or "").replace("https://doi.org/", "")
         results.append({
             "title": work.get("title", "") or "",
             "authors": authors,
             "abstract": _reconstruct_abstract(work.get("abstract_inverted_index")),
             "pdf_url": oa.get("pdf_url") or "",
             "landing_url": work.get("doi") or work.get("id", ""),
+            "doi": doi,
+            "pmcid": ((work.get("ids") or {}).get("pmcid") or "").rsplit("/", 1)[-1],
             "source": "openalex",
         })
     return results
