@@ -17,6 +17,7 @@ from config import (
 from notes import read_note, write_note, safe_filename, today
 from academic import extract_paper_text
 from clipper import process_clipped_note, find_existing_source
+import fulltext
 
 
 def _load_existing(path: Path) -> dict | None:
@@ -29,29 +30,40 @@ def _load_existing(path: Path) -> dict | None:
     return {"title": path.stem, "analysis": analysis}
 
 
-def _clip_source(url: str, title: str, kind: str, body: str, full_text: bool) -> dict | None:
+def _clip_source(url: str, title: str, kind: str, body: str, full_text: bool,
+                 identifiers: dict | None = None, route: str = "") -> dict | None:
     """
     Write a queued source's text as a clip stub and run it through the clipper
     pipeline, returning {title, analysis, raw} — or None if the clipper discarded it
     (e.g. its analyzer judged the content not to be the real document, or a dup race).
+
+    Any identifiers we resolved are persisted into the clip's frontmatter. This is
+    the fix for the pipeline's most expensive omission: a search result knows the
+    DOI, the URL it hands us frequently does not, and dropping it on the floor is
+    why 55% of the vault's abstract-only clips cannot be re-resolved later without
+    an unreliable title search. Recording it makes every such clip cheaply
+    recoverable by a future backfill.
     """
     clip_path = INBOX_PATH / f"{safe_filename(title)}.md"
     if clip_path.exists():
         # name collision with an unrelated note — disambiguate
         clip_path = INBOX_PATH / f"{safe_filename(title)} ({today()}).md"
 
-    write_note(
-        clip_path,
-        frontmatter={
-            "clipped": True,
-            "source": url,
-            "date": today(),
-            "processed": False,
-            "source_type": "research_found",
-            "full_text": full_text,
-        },
-        body=body,
-    )
+    frontmatter = {
+        "clipped": True,
+        "source": url,
+        "date": today(),
+        "processed": False,
+        "source_type": "research_found",
+        "full_text": full_text,
+    }
+    for key in ("doi", "pmcid", "pmid", "arxiv"):
+        if (identifiers or {}).get(key):
+            frontmatter[key] = identifiers[key]
+    if route:
+        frontmatter["full_text_route"] = route
+
+    write_note(clip_path, frontmatter=frontmatter, body=body)
 
     limit = PAPER_CONTENT_LIMIT if (kind == "pdf" and full_text) else CLIP_CONTENT_LIMIT
     final_path = process_clipped_note(clip_path, content_limit=limit)
@@ -89,33 +101,81 @@ def _process_source(entry: dict) -> dict | None:
         print(f"[research] Source already in vault: {existing.stem}")
         return _load_existing(existing)
 
-    # Retrieve full text
+    ids = fulltext.extract_identifiers(url, entry.get("identifiers"))
+    # The identity gate matches against the abstract; the title is a weak stand-in
+    # used only when discovery didn't supply one.
+    reference = abstract or title
+
+    # ── Attempt 1: the URL we were given, fetched directly ────────────────────
+    # Kept first because it is one request and already succeeds about half the time.
+    # `landing_url` is deliberately NOT the PDF URL: passing the same value made
+    # academic.py's landing-page fallback unreachable (its guard is
+    # `landing_url != pdf_url`), so a kind="pdf" source whose download failed had no
+    # fallback whatsoever. The OA ladder below is now that fallback, and a better one.
     if kind == "pdf":
-        text = extract_paper_text(url, landing_url=url)
+        text = extract_paper_text(url)
     else:
         from web_tools import fetch_url
         text = fetch_url(url)
-    full_text_ok = bool(text) and not text.startswith("Failed to fetch")
 
-    # Try the full text first. The clipper's analyzer judges whether the retrieved
-    # text is the real document; if it isn't (raw PDF bytes, a bot-wall / CAPTCHA /
-    # paywall interstitial), process_clipped_note discards the stub and _clip_source
-    # returns None — so we fall through to the abstract. A clean, thin, citable clip
-    # beats a garbage one.
-    if full_text_ok:
-        result = _clip_source(url, title, kind, text, full_text=True)
+    if text and not text.startswith("Failed to fetch"):
+        # The clipper's analyzer judges whether the retrieved text is the real
+        # document; if it isn't (raw PDF bytes, a bot-wall / CAPTCHA / paywall
+        # interstitial), process_clipped_note discards the stub and _clip_source
+        # returns None — so we fall through to the ladder.
+        result = _clip_source(url, title, kind, text, full_text=True, identifiers=ids)
         if result:
             return result
-        print(f"[research] Full text unusable — falling back to abstract: {title}")
+        print(f"[research] Direct fetch unusable — trying open-access routes: {title}")
 
-    # Abstract-only fallback: full text couldn't be retrieved (e.g. paywalled PDF) or
-    # was judged not to be the real document above. Still kept and citable, just thinner.
+    # ── Attempt 2: the open-access ladder ─────────────────────────────────────
+    # Derives identifiers and walks the free key-less APIs in order of measured
+    # precision, gating every inferred candidate on document identity.
+    #
+    # fulltext.retrieve already swallows per-route failures, so this except is for
+    # the layer below that contract — an import error, a DNS stack blowing up in a
+    # way requests doesn't wrap. Full-text recovery is a bonus path: it must be able
+    # to fail in any manner at all without costing us the abstract-only clip we
+    # would otherwise have written, let alone the whole research run.
+    try:
+        oa_text, route = fulltext.retrieve(url, reference=reference, identifiers=ids)
+    except Exception as e:
+        print(f"[research] Open-access ladder crashed ({type(e).__name__}: {e}): {title}")
+        oa_text, route = "", "ladder crashed"
+    if oa_text:
+        # Re-derive: the ladder may have upgraded a PMID/DOI to a PMCID, which is
+        # worth persisting — it is the key to the two highest-precision routes.
+        ids = fulltext.extract_identifiers(url, {**ids, **_route_ids(route)})
+        result = _clip_source(url, title, kind, oa_text, full_text=True,
+                              identifiers=ids, route=route)
+        if result:
+            return result
+        print(f"[research] Open-access full text unusable ({route}): {title}")
+    else:
+        print(f"[research] No open-access full text ({route}): {title}")
+
+    # ── Attempt 3: abstract-only ──────────────────────────────────────────────
+    # Full text couldn't be retrieved anywhere (genuinely paywalled), or every
+    # candidate was judged not to be the real document. Still kept and citable,
+    # just thinner — and now carrying its identifiers for a later retry.
     if abstract:
         body = (
             "> [!warning] Abstract only — full text could not be retrieved.\n\n"
             f"## Abstract\n{abstract}"
         )
-        return _clip_source(url, title, kind, body, full_text=False)
+        return _clip_source(url, title, kind, body, full_text=False, identifiers=ids)
 
     print(f"[research] No usable source and no abstract available: {url}")
     return None
+
+
+def _route_ids(route: str) -> dict:
+    """
+    Pull the identifier back out of a ladder route label ("europepmc:PMC12345").
+    The ladder resolves PMIDs and DOIs up to PMCIDs internally; this is how that
+    resolution survives into the clip's frontmatter.
+    """
+    if ":" not in (route or ""):
+        return {}
+    kind, _, value = route.partition(":")
+    return {"pmcid": value} if kind in ("europepmc", "bioc") else {}

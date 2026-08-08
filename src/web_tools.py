@@ -40,15 +40,24 @@ def get_queue() -> list[dict]:
     return list(_queued_sources)
 
 
-def queue_source(url: str, title: str, kind: str, reason: str, abstract: str = "") -> str:
+def queue_source(url: str, title: str, kind: str, reason: str, abstract: str = "",
+                 doi: str = "", landing_url: str = "") -> str:
     """
     Agent calls this to mark a source for full processing into the knowledge base.
     kind is "pdf" (academic paper) or "web" (general web page).
     abstract is the source's abstract/snippet — kept as a fallback so the source
     survives as an abstract-only clipping if its full text can't be retrieved.
     Deduplicated against the existing vault and the current queue; no count limit.
+
+    `doi` and `landing_url` are what make a failed full-text fetch RECOVERABLE. The
+    URL a search hands us is often an opaque publisher PDF path carrying no
+    identifier, while the search result itself knew the DOI — and a source queued
+    without it can only be re-resolved later by an unreliable title search. They are
+    optional so an agent that omits them still queues normally; the identifiers are
+    then derived from whatever the URLs do carry.
     """
     from clipper import find_existing_source  # lazy: clipper imports web tools indirectly
+    import fulltext
 
     existing = find_existing_source(url)
     if existing:
@@ -57,11 +66,22 @@ def queue_source(url: str, title: str, kind: str, reason: str, abstract: str = "
     if any(s["url"] == url for s in _queued_sources):
         return f"Already queued: {title}"
 
+    # Derive from every string we have — the landing URL is frequently a DOI even
+    # when the download URL is not.
+    identifiers = fulltext.extract_identifiers(url)
+    for candidate in (landing_url, doi):
+        if candidate:
+            for k, v in fulltext.extract_identifiers(candidate).items():
+                identifiers.setdefault(k, v)
+    if doi and "doi" not in identifiers:
+        identifiers["doi"] = doi.strip()
+
     _queued_sources.append({
         "url": url, "title": title, "kind": kind, "reason": reason,
-        "abstract": abstract,
+        "abstract": abstract, "identifiers": identifiers,
     })
-    return f"Queued '{title}' ({kind}) for processing."
+    known = ", ".join(f"{k}={v}" for k, v in sorted(identifiers.items()))
+    return f"Queued '{title}' ({kind}) for processing." + (f" [{known}]" if known else "")
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -115,13 +135,18 @@ def _format_academic_results(results: list[dict]) -> str:
     for r in results:
         authors = ", ".join(r.get("authors", [])[:4])
         pdf = r.get("pdf_url") or "(no open PDF)"
-        lines.append(
+        entry = (
             f"- **{r.get('title', '')}** ({r.get('source', '')})\n"
             f"  Authors: {authors}\n"
             f"  Landing: {r.get('landing_url', '')}\n"
-            f"  PDF: {pdf}\n"
-            f"  Abstract: {(r.get('abstract', '') or '')[:500]}"
+            f"  PDF: {pdf}"
         )
+        # Shown explicitly so the agent can hand it to queue_source — a paper queued
+        # with its DOI stays recoverable when the PDF URL turns out to be blocked.
+        if r.get("doi"):
+            entry += f"\n  DOI: {r['doi']}"
+        entry += f"\n  Abstract: {(r.get('abstract', '') or '')[:500]}"
+        lines.append(entry)
     return "\n\n".join(lines)
 
 
@@ -268,6 +293,22 @@ TOOL_SCHEMA = [
                         "Always provide it for papers."
                     ),
                 },
+                "doi": {
+                    "type": "string",
+                    "description": (
+                        "The paper's DOI if the search result showed one (e.g. "
+                        "'10.1016/j.cell.2024.01.001'). ALWAYS pass it for papers: it "
+                        "is what lets the system find a free full-text copy when the "
+                        "PDF URL is paywalled or blocked."
+                    ),
+                },
+                "landing_url": {
+                    "type": "string",
+                    "description": (
+                        "The paper's landing/abstract page, when it differs from the "
+                        "PDF url above. Often carries the DOI."
+                    ),
+                },
             },
             "required": ["url", "title", "kind", "reason"],
         },
@@ -289,7 +330,8 @@ def execute_tool(name: str, args: dict) -> str:
         return queue_source(
             args.get("url", ""), args.get("title", ""),
             args.get("kind", "web"), args.get("reason", ""),
-            args.get("abstract", ""),
+            args.get("abstract", ""), args.get("doi", ""),
+            args.get("landing_url", ""),
         )
     else:
         return f"Unknown tool: {name}"

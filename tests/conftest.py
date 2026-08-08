@@ -65,7 +65,7 @@ def tmp_vault(tmp_path, monkeypatch):
 
     # Patch VAULT_PATH plus each derived constant everywhere it was imported.
     targets = ["config"]
-    for modname in ("clipper", "reset_clips", "indexer"):
+    for modname in ("clipper", "reset_clips", "indexer", "researcher.sources"):
         try:
             __import__(modname)
             targets.append(modname)

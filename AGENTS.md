@@ -96,6 +96,7 @@ obsidian_system/
     ├── gemini_client.py     ← Backward-compat shim → llm.py
     ├── indexer.py           ← MOC maintenance; find_relevant_clippings / _research
     ├── academic.py          ← arXiv + OpenAlex search; PDF download + text extract
+    ├── fulltext.py          ← open-access retrieval ladder + identity/structure gates
     ├── web_tools.py         ← search/fetch/queue_source discovery tools
     ├── clipper.py           ← Web Clipper note processing pipeline
     ├── researcher/          ← Research + callout + concept pipelines (a package)
@@ -157,16 +158,38 @@ calls `search_arxiv` / `search_openalex` / `search_web` / `fetch_url`, then
 `queue_source(url, title, kind, reason, abstract)` for each keeper. No source cap;
 already-vaulted URLs are skipped.
 
-**③ Process each queued source** (`sources._process_source`):
-- `pdf` → `academic.extract_paper_text()` downloads the PDF and extracts full text.
-- `web` → `web_tools.fetch_url()` (refuses non-HTML/binary responses).
+**③ Process each queued source** (`sources._process_source`) — three attempts,
+stopping at the first that yields a usable document:
+
+1. **The URL as given.** `pdf` → `academic.extract_paper_text()`; `web` →
+   `web_tools.fetch_url()` (refuses non-HTML/binary responses). One request, and it
+   already works about half the time.
+2. **The open-access ladder** (`fulltext.retrieve()`) — runs when attempt 1 fails
+   *or* when the clipper judges what it returned not to be the document. Derives
+   every identifier it can (DOI / PMCID / PMID / arXiv) from the URL plus whatever
+   discovery persisted, upgrades a PMID or DOI to a PMCID where possible, then walks
+   the free key-less routes in descending order of **measured** precision: Europe PMC
+   → NCBI BioC → arXiv → Unpaywall → OpenAlex.
+3. **Abstract-only**, exactly as before — or skipped if there's no abstract.
 
 The text is written to Clippings/ (`source_type: research_found`) and run through
 `clipper.process_clipped_note()`, which returns a `usable` verdict. Non-content
-(raw bytes, bot-wall / CAPTCHA / paywall, error page) is discarded and the source
-falls back to an abstract-only clip, or is skipped if there's no abstract — a
-blocked source becomes a clean, thin, citable clip rather than a garbage note (see
+(raw bytes, bot-wall / CAPTCHA / paywall, error page) is discarded — a blocked
+source becomes a clean, thin, citable clip rather than a garbage note (see
 DESIGN_NOTES § Rejecting non-content). A real source is indexed into a MOC.
+
+**Two gates guard the ladder**, because a wrong document is worse than a thin one:
+an *identity* check (retrieved text vs the source's abstract) and a *structure*
+check (a real article has sections; a landing page is an abstract in chrome). A
+route keyed by an identifier read off the URL is trusted and skips both. Never
+raises — any failure falls through to the abstract-only clip. Why these routes and
+not the higher-recall ones, and how the thresholds were calibrated: DESIGN_NOTES §
+Full-text recovery.
+
+**Identifiers are persisted** (`doi` / `pmcid` / `pmid` / `arxiv` in clip
+frontmatter, plus `full_text_route` when the ladder succeeded). A source queued
+with its DOI stays recoverable forever; one queued without it can only be found
+again by an unreliable title search.
 
 **④ Synthesise** (`synthesis._synthesise`) — builds an **unnumbered** source index
 of exact `[[wikilink]]` titles and writes the report. Related prior reports are
@@ -449,11 +472,15 @@ During phase ② the agent has five tools (`src/web_tools.py`, `src/academic.py`
 | `search_openalex(query)` | OpenAlex papers, all disciplines — OA PDF when available |
 | `search_web(query)`      | Tavily web search (skipped with a clear message if no key) |
 | `fetch_url(url)`         | Read a web page to evaluate it |
-| `queue_source(url, title, kind, reason, abstract)` | Mark a source for processing |
+| `queue_source(url, title, kind, reason, abstract, doi, landing_url)` | Mark a source for processing |
 
 `queue_source` dedups against the vault and the current queue; there is **no count
 cap**. The `abstract` argument is kept so a source survives as an abstract-only
-clipping (`full_text: false`) when its full text can't be retrieved.
+clipping (`full_text: false`) when its full text can't be retrieved. `doi` /
+`landing_url` are optional but matter a lot: the URL a search hands over is often an
+opaque publisher PDF path carrying no identifier, and a source queued without its
+DOI can't be re-resolved later by the open-access ladder. Academic search results
+now print the DOI on its own line so the agent can pass it straight through.
 
 ---
 
@@ -495,8 +522,8 @@ pytest -m llm         # Tier 3 only — real LLM, costs money, needs API keys
 
 | Tier | Folder | What | In default run? |
 |------|--------|------|-----------------|
-| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the callout edit contract + correction gates, the run ledger + dashboard note render | ✅ free, ~0.5s |
-| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, dashboard note + `/api/state` over HTTP | ✅ free, fast |
+| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the callout edit contract + correction gates, identifier extraction + the full-text identity/structure gates, the run ledger + dashboard note render | ✅ free, ~0.5s |
+| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, the three-attempt source cascade with the **network mocked**, dashboard note + `/api/state` over HTTP | ✅ free, fast |
 | 3 | `tests/llm/` | **Real LLM calls** — the `usable` gate, citation repair, MOC granularity | ❌ opt-in (`-m llm`) |
 
 `tests/conftest.py` puts `src/` on `sys.path` and provides `tmp_vault` (monkeypatches
