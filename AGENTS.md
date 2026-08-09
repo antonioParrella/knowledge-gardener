@@ -567,6 +567,7 @@ sources (keeper chosen by `_clip_quality`, not age), orphan/duplicate MOC entrie
 | `consolidate_tags.py` | Unify drifted tags → canonical vocabulary. Proposes `tag_map.json`, apply after review. |
 | `fix_math_delimiters.py` | Rewrite LaTeX `\(…\)`/`\[…\]` → Obsidian `$…$`/`$$…$$` in reports written before the guard existed. |
 | `reconceptualize.py` | Re-extract concepts from reports conceptualized while the extractor only saw their first 15k chars. `--only <substr>` for one report. `--apply` queues paid generation runs — dry-run first. |
+| `backfill_fulltext.py` | Retry full-text retrieval for clips that settled for an abstract before the OA ladder existed, and re-analyse the ones it recovers. `--limit N` / `--only <substr>` to scope, `--resolve-titles` to also try resolving an identifier from the title (lower precision, still gated), `--apply` to commit. |
 
 These are one-time migrations, not part of the live pipeline — see the relevant
 DESIGN_NOTES section for what each was cleaning up.

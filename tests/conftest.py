@@ -37,6 +37,33 @@ def isolate_telemetry(tmp_path, monkeypatch):
     telemetry.configure(state_path=before[0], events_path=before[1])
 
 
+@pytest.fixture(autouse=True)
+def block_real_llm_calls(request, monkeypatch):
+    """
+    Fail loudly if a test outside tests/llm/ reaches a real provider.
+
+    Tiers 1 and 2 mock the model, but they mock it by name at the call site — and a
+    call site that gets renamed (or a test that patches `process_clipped_note` when
+    the code now calls `_analyse_clip`) silently starts spending money and hitting
+    the network instead of failing. That has happened; this makes it impossible.
+
+    Patched at `llm._provider`, the single choke point every task routes through,
+    because modules bind `from llm import llm_simple` at import and hold their own
+    reference — patching `llm.llm_simple` would never reach `clipper.llm_simple`.
+    Tests marked `llm` are exempt: spending money is their whole purpose.
+    """
+    if request.node.get_closest_marker("llm"):
+        return
+    import llm
+
+    def refuse(name):
+        raise AssertionError(
+            f"Real LLM provider '{name}' was reached in a non-llm test. Mock the "
+            f"call site, or mark the test with @pytest.mark.llm if it should spend."
+        )
+    monkeypatch.setattr(llm, "_provider", refuse)
+
+
 @pytest.fixture
 def tmp_vault(tmp_path, monkeypatch):
     """
