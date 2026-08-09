@@ -95,7 +95,8 @@ def reset_clips(inbox_path: Path, dry_run: bool = False):
     return count
 
 
-def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
+def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT,
+                         reindex: bool = True):
     """
     Full processing pipeline for a Web Clipper note.
     Skips silently if not a valid unprocessed clip.
@@ -103,6 +104,12 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     content_limit caps how much of the body is sent to the analysis model;
     full-text papers pass a higher limit so the analysis sees more than the
     first couple of pages. The full body is always preserved as Original Content.
+
+    reindex=False re-analyses the note WITHOUT touching MOCs. Only the full-text
+    backfill passes it: those clips are already indexed, and re-running
+    assign_to_moc on a richer analysis can land the same note in a *different* MOC
+    — leaving it listed in two, with both note_counts wrong. The backfill is
+    upgrading a note's content, not re-deciding where it lives.
 
     Returns the final note path (which may have been renamed) on success, else None.
     """
@@ -128,11 +135,11 @@ def process_clipped_note(path: Path, content_limit: int = CLIP_CONTENT_LIMIT):
     # a clipping) doesn't replace the research run on the dashboard — telemetry.run
     # only annotates it. Standalone clips get their own run.
     with telemetry.run("clip", path.stem):
-        return _analyse_clip(path, fm, body, source_url, content_limit)
+        return _analyse_clip(path, fm, body, source_url, content_limit, reindex)
 
 
 def _analyse_clip(path: Path, fm: dict, body: str, source_url: str,
-                  content_limit: int) -> Path | None:
+                  content_limit: int, reindex: bool = True) -> Path | None:
     """Analyse, rename, index, and rewrite one clip. See process_clipped_note."""
     telemetry.phase("analysing")
     content = body[:content_limit]
@@ -182,14 +189,15 @@ def _analyse_clip(path: Path, fm: dict, body: str, source_url: str,
 
     summary_body = f"{analysis}\n\n---\n\n## Original Content\n\n{body}"
 
-    telemetry.phase("indexing", detail=path.stem)
-    index_note(
-        note_title=path.stem,
-        note_path=path,
-        summary=moc_summary,
-        tags=tags,
-        analysis=analysis,
-    )
+    if reindex:
+        telemetry.phase("indexing", detail=path.stem)
+        index_note(
+            note_title=path.stem,
+            note_path=path,
+            summary=moc_summary,
+            tags=tags,
+            analysis=analysis,
+        )
 
     fm["processed"] = True
     fm["processed_date"] = today()
