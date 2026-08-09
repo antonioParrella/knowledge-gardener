@@ -272,6 +272,51 @@ anyway, and any failure falls through to the abstract-only clip that would have
 been written regardless. The ladder can only add recoveries; it can never take a
 working path away.
 
+### The backfill
+
+`backfill_fulltext.py` is the one-off pass over clips gathered *before* the ladder
+existed. Dry-run by default like the other backfills — and its dry run does the
+whole retrieval half for real, because retrieval is the uncertain step, so what it
+prints is exactly what `--apply` will act on.
+
+Recovered text replaces the abstract stub and the clip is **re-analysed**. That is
+the actual point: these notes already exist and are already cited, they were just
+written from 200 words of abstract.
+
+Rewriting notes a live vault is citing needs three properties, and each one is a
+bug that would otherwise be silent:
+
+- **The filename never changes** (`preserve_title`). Reports cite clips by
+  `[[title]]`, and a better analysis usually implies a better title — so a backfill
+  that let the clipper rename would quietly break the citation graph it set out to
+  enrich.
+- **MOCs are never re-assigned** (`reindex=False`, added to `process_clipped_note`
+  for this). The note is already indexed; re-running `assign_to_moc` on a richer
+  analysis can legitimately pick a *different* MOC, leaving one note listed in two
+  with both `note_count`s wrong. Only the existing entry's one-line gloss is
+  refreshed, in place — no entry added, moved, or counted.
+- **Any failure restores the clip byte-for-byte**, including the analyser rejecting
+  the recovered text as `usable: false`. Worst case is the clip you already had.
+
+It calls `clipper._analyse_clip` directly rather than `process_clipped_note`, so
+`processed` never goes `False` on disk. The watchdog runs while the backfill does,
+and a clip parked at `processed: false` for the length of an analysis call is
+exactly what the 60s rescan looks for — it would pick the note up and analyse it a
+second time, concurrently.
+
+`--resolve-titles` opts into resolving an identifier from the title for the 55% of
+the backlog whose URL carries none. It is off by default at 25% measured precision;
+what makes it usable at all is that its candidates still face both gates. On a
+25-clip sample it added one recovery and doubled the runtime, so it is worth
+reaching for on a targeted `--only` slice rather than a whole-vault pass.
+
+**A note on the test suite.** Writing these tests spent real money: the mocks bind
+by call-site name, the code moved from `process_clipped_note` to `_analyse_clip`,
+and the tests kept passing while quietly making live API calls (one run took 106
+seconds instead of 6). `tests/conftest.py` now fails any test not marked `llm` that
+reaches `llm._provider` — the single choke point, patched there rather than at
+`llm_simple` because modules bind that name at import and hold their own reference.
+
 ---
 
 ## Duplicate prevention — the overnight-duplicates origin
