@@ -10,15 +10,84 @@ full text, reusing the vault's existing PDF extraction (pdf_processor).
 """
 
 import tempfile
+import threading
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
 from config import (
     ARXIV_API_URL, OPENALEX_API_URL, FETCH_CONTENT_LIMIT,
+    ARXIV_MIN_INTERVAL_SECS, ARXIV_MAX_ATTEMPTS, ARXIV_BACKOFF_SECS,
 )
 
 _HEADERS = {"User-Agent": "knowledge-gardener-research/1.0 (mailto:parrella17@gmail.com)"}
+
+
+# ── arXiv request pacing ────────────────────────────────────────────────────────
+# arXiv answers a burst with 429s carrying no Retry-After, and a rate-limited search
+# returns [{"error": ...}] to the model instead of raising — so the lane goes dark
+# without a single line in the log saying so (see config § ARXIV_MIN_INTERVAL_SECS).
+#
+# The gate is process-wide and covers searches AND PDF downloads, because they share
+# the host's budget: three back-to-back searches followed by a dozen PDF fetches is
+# one burst as far as arXiv is concerned, however the code is factored.
+
+_arxiv_lock = threading.Lock()
+_arxiv_last = 0.0
+
+
+def is_arxiv(url: str) -> bool:
+    """True for any arxiv.org host (arxiv.org, export.arxiv.org, …)."""
+    host = urlparse(url).netloc.lower()
+    return host == "arxiv.org" or host.endswith(".arxiv.org")
+
+
+def pace_arxiv() -> None:
+    """
+    Block until ARXIV_MIN_INTERVAL_SECS have elapsed since the last arXiv request.
+
+    The lock is held across the sleep on purpose: two threads that computed their
+    wait independently would both wake and fire together, which is the burst this
+    exists to prevent.
+    """
+    global _arxiv_last
+    with _arxiv_lock:
+        wait = ARXIV_MIN_INTERVAL_SECS - (time.monotonic() - _arxiv_last)
+        if wait > 0:
+            time.sleep(wait)
+        _arxiv_last = time.monotonic()
+
+
+def arxiv_get(url: str, **kwargs) -> requests.Response:
+    """
+    GET an arXiv URL, paced and retried on rate-limiting.
+
+    Retries only what a retry can fix — a 429 or a transport error. Any other HTTP
+    error (404 on a withdrawn paper) raises on the first attempt. Exhausting the
+    attempts re-raises, so the caller reports a real failure rather than silently
+    treating "we were throttled" as "arXiv has nothing".
+    """
+    last: Exception | None = None
+    for attempt in range(ARXIV_MAX_ATTEMPTS):
+        pace_arxiv()
+        try:
+            resp = requests.get(url, headers=_HEADERS, **kwargs)
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp
+            last = requests.HTTPError(
+                f"429 Too Many Requests (arXiv rate limit) for url: {url}",
+                response=resp,
+            )
+        except requests.HTTPError:
+            raise
+        except Exception as e:      # connection reset, read timeout, DNS blip
+            last = e
+        if attempt < ARXIV_MAX_ATTEMPTS - 1:
+            time.sleep(ARXIV_BACKOFF_SECS * (2 ** attempt))
+    raise last
 
 
 # ── arXiv ───────────────────────────────────────────────────────────────────────
@@ -35,7 +104,7 @@ def search_arxiv(query: str, max_results: int = 8) -> list[dict]:
         return [{"error": "feedparser not installed — run: pip install feedparser"}]
 
     try:
-        resp = requests.get(
+        resp = arxiv_get(
             ARXIV_API_URL,
             params={
                 "search_query": f"all:{query}",
@@ -43,11 +112,12 @@ def search_arxiv(query: str, max_results: int = 8) -> list[dict]:
                 "max_results": max_results,
                 "sortBy": "relevance",
             },
-            headers=_HEADERS,
             timeout=20,
         )
-        resp.raise_for_status()
     except Exception as e:
+        # Loud, because the model only sees the string it gets back: a silent
+        # "no results" is indistinguishable from "arXiv has nothing on this".
+        print(f"[academic] arXiv search failed after {ARXIV_MAX_ATTEMPTS} attempts: {e}")
         return [{"error": f"arXiv search failed: {e}"}]
 
     feed = feedparser.parse(resp.text)
@@ -135,10 +205,18 @@ def search_openalex(query: str, max_results: int = 8) -> list[dict]:
 # ── Full-text retrieval ─────────────────────────────────────────────────────────
 
 def download_pdf(url: str) -> Path | None:
-    """Download a PDF to a temp file. Returns the path, or None on failure."""
+    """
+    Download a PDF to a temp file. Returns the path, or None on failure.
+
+    arXiv PDFs go through the same paced/retried path as searches — they draw on the
+    same per-host budget, and a research run downloads far more PDFs than it searches.
+    """
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
-        resp.raise_for_status()
+        if is_arxiv(url):
+            resp = arxiv_get(url, timeout=30)
+        else:
+            resp = requests.get(url, headers=_HEADERS, timeout=30)
+            resp.raise_for_status()
         # Guard against HTML error pages served with a .pdf URL
         ctype = resp.headers.get("Content-Type", "")
         if "pdf" not in ctype.lower() and not resp.content[:5].startswith(b"%PDF"):

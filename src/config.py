@@ -162,6 +162,35 @@ ARXIV_API_URL    = "http://export.arxiv.org/api/query"
 OPENALEX_API_URL = "https://api.openalex.org/works"
 TAVILY_API_URL   = "https://api.tavily.com/search"
 
+# arXiv publishes a rate limit of one request every 3 seconds and enforces it by
+# answering a burst with 429s that carry no Retry-After. The discovery loop fires
+# several searches in a single turn and then downloads PDFs from the same host, so
+# it trips this routinely — and a failed search returns [{"error": ...}] to the
+# model rather than raising, which means the whole arXiv lane goes dark silently.
+# Observed 2026-08-12: a comprehensive run made 16 searches, queued ZERO sources,
+# and wrote a report anyway; nothing in the log or telemetry said arXiv was down.
+#
+# One process-wide gate paces every arxiv.org request (search AND PDF download) and
+# a bounded retry absorbs a 429 that still slips through. The cost is wall-clock in
+# a phase already dominated by model latency, not money.
+ARXIV_MIN_INTERVAL_SECS = 3.0  # arXiv's published limit: 1 request / 3s
+ARXIV_MAX_ATTEMPTS      = 3    # total tries before a 429 is reported as a failure
+ARXIV_BACKOFF_SECS      = 5.0  # base of the exponential backoff between tries
+
+# ── Prior-knowledge lookup ──────────────────────────────────────────────────────
+# Phase ① used to hand the model the ENTIRE note catalog, flattened out of every
+# MOC: 907 entries / ~194 KB / ~34k tokens on a vault this size, growing with every
+# clip saved. That made the cheapest task in the pipeline carry its largest prompt,
+# on the free Gemini tier, where it silently failed — a comprehensive run on
+# 2026-08-12 sent 34,314 input tokens and got ZERO output tokens back, so the report
+# was written with no prior knowledge at all and nothing anywhere said so.
+#
+# MOCs already ARE the vault's topic index, so the lookup walks the graph instead of
+# flattening it: pick sub-fields from the ~75 MOC names (~2 KB), then read only those
+# MOCs' entries. Same two steps a person takes — open the index, then the folder.
+MOC_SHORTLIST_MAX  = 8    # MOCs opened per lookup; a topic spanning more is a tag, not a topic
+MOC_CANDIDATE_MAX  = 250  # entries passed to the note-picking call, a runaway guard
+
 # ── Concept settings ────────────────────────────────────────────────────────────
 # Upper bound on how many concepts the conceptualizer pass extracts from a single
 # research report — a cap on over-triggering, not a target. Each new concept fires

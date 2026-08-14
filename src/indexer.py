@@ -15,7 +15,7 @@ from notes import read_note, write_note, today, normalize_tag, normalize_tags
 from llm import llm_simple, parse_json_response
 from config import (
     INDEX_PATH, INBOX_PATH, SOURCES_PATH, RESEARCH_PATH, CONCEPTS_PATH,
-    RESEARCH_CONTEXT_EXCERPT, load_prompt,
+    RESEARCH_CONTEXT_EXCERPT, MOC_SHORTLIST_MAX, MOC_CANDIDATE_MAX, load_prompt,
 )
 
 # Matches a MOC note entry: "- [[Title]] — summary" (em-dash or hyphen separator).
@@ -296,17 +296,41 @@ def get_prior_context(topic: str) -> str:
     return "## Relevant content from your knowledge base:\n\n" + "\n\n".join(matches[:3])
 
 
-def _read_moc_catalog() -> list[tuple[str, str]]:
+def _moc_topic(path: Path, fm: dict) -> str:
+    """A MOC's topic name, from its frontmatter or (failing that) its filename."""
+    topic = (fm.get("topic") or "").strip()
+    return topic or path.stem.removeprefix("MOC - ").strip()
+
+
+def _moc_topics() -> list[tuple[str, int]]:
+    """(topic, note_count) for every MOC — the entry points a lookup starts from."""
+    topics: list[tuple[str, int]] = []
+    for moc in sorted(INDEX_PATH.glob("MOC - *.md")):
+        try:
+            fm, _ = read_note(moc)
+        except Exception:
+            continue
+        count = fm.get("note_count")
+        topics.append((_moc_topic(moc, fm), count if isinstance(count, int) else 0))
+    return topics
+
+
+def _read_moc_catalog(only: set[str] | None = None) -> list[tuple[str, str]]:
     """
-    Read every MOC and return the full (title, summary) catalog of indexed notes.
+    Read MOCs and return the (title, summary) catalog of the notes they index.
     The MOCs already hold a one-line summary per note, so this is cheap.
+
+    `only` restricts the read to those MOC topics — the second half of the shortlist
+    traversal. None reads every MOC, which is what the whole-vault callers still want.
     """
     catalog: list[tuple[str, str]] = []
     seen = set()
-    for moc in INDEX_PATH.glob("MOC - *.md"):
+    for moc in sorted(INDEX_PATH.glob("MOC - *.md")):
         try:
-            _, body = read_note(moc)
+            fm, body = read_note(moc)
         except Exception:
+            continue
+        if only is not None and _moc_topic(moc, fm) not in only:
             continue
         for line in body.splitlines():
             m = _MOC_ENTRY_RE.match(line.strip())
@@ -320,6 +344,70 @@ def _read_moc_catalog() -> list[tuple[str, str]]:
     return catalog
 
 
+def _shortlist_mocs(topic: str) -> set[str]:
+    """
+    Pick the MOCs worth opening for a research topic, from their names alone.
+
+    This is the cheap half of the traversal: ~75 lines of "topic (n notes)" rather
+    than every note in the vault. MOCs are deliberately narrow sub-fields, so a name
+    is enough to decide whether a topic could live inside one.
+
+    The model leads, because only it judges meaning — "Time-Restricted Eating"
+    belongs under Metabolic Health, a name it shares no word with. A deterministic
+    word-overlap pass stands behind it as a FALLBACK, used only when the model
+    returned nothing usable (empty response, spent quota, provider down), so a bad
+    model day costs precision rather than all prior knowledge.
+
+    Deliberately a fallback and not a union: unioned, "Time-Restricted Eating" pulls
+    in `MOC - Time Series` on the word "time", and every such false positive spends
+    candidate slots on notes that cannot be relevant.
+    """
+    mocs = _moc_topics()
+    if not mocs:
+        return set()
+
+    words = {w for w in re.findall(r"[a-z0-9]+", topic.lower()) if len(w) > 3}
+    lexical = {t for t, _ in mocs
+               if {w for w in re.findall(r"[a-z0-9]+", t.lower()) if len(w) > 3} & words}
+
+    listing = "\n".join(f"- {t} ({n} notes)" for t, n in mocs)
+    try:
+        response = llm_simple(
+            task="moc",
+            prompt=(
+                f"Research topic: {topic}\n\n"
+                f"Topic indexes (MOCs) in the knowledge base:\n{listing}\n\n"
+                f"Return a JSON array of the EXACT index names whose notes could be "
+                f"relevant to this topic — the ones worth opening. Prefer few: at most "
+                f"{MOC_SHORTLIST_MAX}. Use the names verbatim. Return [] if none fit. "
+                f"No prose, JSON array only."
+            ),
+            system=(
+                "You route a research topic to the relevant topic indexes of a personal "
+                "knowledge base. Each index is a narrow sub-field. Judge by meaning, not "
+                "by shared words: a topic often belongs to an index whose name it does "
+                "not contain."
+            ),
+        )
+        picked = parse_json_response(response)
+    except Exception as e:
+        print(f"[index] MOC shortlist failed ({e}) — falling back to name matching")
+        picked = None
+
+    valid = {t for t, _ in mocs}
+    chosen = [] if not isinstance(picked, list) else [
+        t for t in picked if isinstance(t, str) and t in valid
+    ]
+    if chosen:
+        return set(chosen[:MOC_SHORTLIST_MAX])
+    if lexical:
+        print(f"[index] MOC shortlist empty for '{topic}' — falling back to "
+              f"{len(lexical)} name match(es)")
+        return set(sorted(lexical)[:MOC_SHORTLIST_MAX])
+    print(f"[index] No MOC matched '{topic}' — no prior knowledge to draw on")
+    return set()
+
+
 def _locate_note(title: str) -> Path | None:
     """Find the note file for a given title in Clippings/ or Sources/."""
     for folder in (INBOX_PATH, SOURCES_PATH):
@@ -331,10 +419,15 @@ def _locate_note(title: str) -> Path | None:
 
 def find_relevant_clippings(topic: str) -> list[dict]:
     """
-    Ask Gemini which existing notes are relevant to a research topic, using the
-    MOC catalog (title + one-line summary) as the candidate list — no keyword
-    prefilter. Returns [{title, analysis}] with the full analysis loaded for each
-    selected note (the body before the "## Original Content" section).
+    Find the existing notes relevant to a research topic by walking the MOC graph:
+    shortlist the topic indexes worth opening, then pick notes from inside those.
+    Returns [{title, analysis}] with the full analysis loaded for each selected note
+    (the body before the "## Original Content" section).
+
+    Two small calls rather than one huge one. Handing the model every note in the
+    vault made this the largest prompt in the pipeline (~34k tokens at 900 notes, and
+    growing without bound) on the tier least able to carry it; see config
+    § MOC_SHORTLIST_MAX for the run where it silently returned nothing at all.
 
     Prior research reports (notes in Research/) are excluded from the candidate
     list — they're handled as related work by find_relevant_research(), not as
@@ -342,11 +435,18 @@ def find_relevant_clippings(topic: str) -> list[dict]:
     (Concepts/) are excluded too: they're textbook explainers cross-listed into
     MOCs, not primary sources, and _locate_note() couldn't find them anyway.
     """
+    shortlist = _shortlist_mocs(topic)
+    if not shortlist:
+        return []
+
     excluded = {p.stem for p in RESEARCH_PATH.glob("*.md")}
     excluded |= {p.stem for p in CONCEPTS_PATH.glob("*.md")}
-    catalog = [(t, s) for t, s in _read_moc_catalog() if t not in excluded]
+    catalog = [(t, s) for t, s in _read_moc_catalog(only=shortlist) if t not in excluded]
     if not catalog:
         return []
+    catalog = catalog[:MOC_CANDIDATE_MAX]
+    print(f"[index] Prior knowledge: {len(shortlist)} MOC(s) -> "
+          f"{len(catalog)} candidate note(s) for '{topic}'")
 
     catalog_text = "\n".join(f"- {title} — {summary}" for title, summary in catalog)
     response = llm_simple(
@@ -366,6 +466,11 @@ def find_relevant_clippings(topic: str) -> list[dict]:
 
     titles = parse_json_response(response)
     if not isinstance(titles, list):
+        # An unparseable answer here used to look exactly like "nothing is relevant",
+        # so a model that returned an empty response cost the run its prior knowledge
+        # in total silence. Say so — the run continues either way.
+        print(f"[index] Prior-knowledge pick returned no usable JSON "
+              f"({len(response or '')} chars) — continuing without prior clippings")
         return []
 
     valid = {t for t, _ in catalog}

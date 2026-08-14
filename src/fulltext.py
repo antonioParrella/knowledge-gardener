@@ -389,6 +389,15 @@ def resolve_pmcid(ids: dict) -> str | None:
 def _pdf_text(url: str) -> str:
     """Download and extract a PDF. Returns "" on anything that isn't really a PDF."""
     try:
+        # The arXiv route retries the same paper against two hosts, and the ladder
+        # runs once per source — pace it against the same process-wide gate the
+        # search tools use, or the recovery path becomes its own burst.
+        from academic import is_arxiv, pace_arxiv
+        if is_arxiv(url):
+            pace_arxiv()
+    except Exception:
+        pass
+    try:
         r = requests.get(url, headers=_HEADERS, timeout=FULLTEXT_TIMEOUT_SECS,
                          allow_redirects=True)
         if r.status_code != 200 or not r.content[:5].startswith(b"%PDF"):
