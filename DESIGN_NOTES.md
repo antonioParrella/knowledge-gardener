@@ -272,6 +272,37 @@ anyway, and any failure falls through to the abstract-only clip that would have
 been written regardless. The ladder can only add recoveries; it can never take a
 working path away.
 
+### LaTeX vs JSON — the silently-dropped sources
+
+The backfill's first run failed 9 of 29 attempts with "JSON parse failed", and the
+live log turned out to carry 45 of the same in a month. Every one is a source the
+pipeline fetched, analysed, paid for, and then dropped on the floor.
+
+The cause is that a clip analysis of a paper contains maths. The model writes
+`$lpha$` or `\[ x \]` into a JSON string field, and `` / `\[` are not valid JSON
+escape sequences, so `json.loads` rejects the *entire* response, `parse_json_response`
+returns `{}`, and the caller treats it as an unusable clip. Full-text papers are the
+worst case precisely because they are the ones with maths in them — which is why
+recovering full text made a pre-existing bug suddenly visible.
+
+`parse_json_response` now tries a strict parse first and only then repairs invalid
+escapes and retries. That ordering is the safety property: it can add recoveries but
+can never change how an already-valid response is read, and a response truncated
+mid-structure stays correctly unparseable — repair fixes malformed escapes, not
+missing text.
+
+**The asymmetry it leaves behind is deliberate.** `eta`, `	heta`, `rac`, `
+u`
+and `ho` are *valid* JSON escapes (backspace, tab, formfeed, newline, carriage
+return), so they parse cleanly while silently eating the command — `eta` becomes a
+backspace character followed by "eta". Those never reach the repair path, because
+nothing failed. Telling an intended `
+` from a LaTeX `
+u` is not decidable from the
+text alone, so this is left to the prompt's "use `$…$`" instruction rather than
+guessed at here. A vault scan found 3 notes carrying such eaten commands, which is
+the honest size of the residual.
+
 ### The backfill
 
 `backfill_fulltext.py` is the one-off pass over clips gathered *before* the ladder
