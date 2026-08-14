@@ -146,8 +146,14 @@ A trigger note in `_triggers/` (its **title** is the topic) drives four phases v
 `researcher.process_research_trigger()`:
 
 **① Prior knowledge — two separate lanes.**
-- `find_relevant_clippings(topic)` — Gemini reads the MOC catalog and picks
-  relevant clippings. These become cited primary **sources**.
+- `find_relevant_clippings(topic)` — walks the **MOC graph** in two cheap steps
+  rather than flattening it: `_shortlist_mocs()` picks the topic indexes worth
+  opening from their names alone (~75 lines), then only those MOCs' entries are read
+  and a second call picks the notes. These become cited primary **sources**. The old
+  single call handed the model every note in the vault (~34k tokens at 900 notes, and
+  unbounded) and silently returned nothing at that size — see DESIGN_NOTES § Prior
+  knowledge. Capped by `MOC_SHORTLIST_MAX` / `MOC_CANDIDATE_MAX`; a shortlist the
+  model can't produce falls back to deterministic name matching.
 - `find_relevant_research(topic)` — picks related prior reports in Research/.
   These are **related work**, not sources: they ground discovery and synthesis, and
   the new report cross-links to them under a "## Related research" heading instead
@@ -468,7 +474,7 @@ During phase ② the agent has five tools (`src/web_tools.py`, `src/academic.py`
 
 | Tool | Purpose |
 |------|---------|
-| `search_arxiv(query)`    | arXiv papers — every result has a full-text PDF |
+| `search_arxiv(query)`    | arXiv papers — every result has a full-text PDF. Paced to arXiv's 1-request-per-3s limit and retried on 429 (shared with PDF downloads and the OA ladder's arXiv route); an unrecoverable rate-limit is now **printed**, because a silent one reads to the agent as "arXiv has nothing" — see DESIGN_NOTES § arXiv rate limiting |
 | `search_openalex(query)` | OpenAlex papers, all disciplines — OA PDF when available |
 | `search_web(query)`      | Tavily web search (skipped with a clear message if no key) |
 | `fetch_url(url)`         | Read a web page to evaluate it |
@@ -522,8 +528,8 @@ pytest -m llm         # Tier 3 only — real LLM, costs money, needs API keys
 
 | Tier | Folder | What | In default run? |
 |------|--------|------|-----------------|
-| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the callout edit contract + correction gates, identifier extraction + the full-text identity/structure gates, the run ledger + dashboard note render | ✅ free, ~0.5s |
-| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, the three-attempt source cascade with the **network mocked**, dashboard note + `/api/state` over HTTP | ✅ free, fast |
+| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the callout edit contract + correction gates, identifier extraction + the full-text identity/structure gates, the arXiv rate-limit gate, the run ledger + dashboard note render | ✅ free, ~0.5s |
+| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, the three-attempt source cascade with the **network mocked**, the MOC-graph prior-knowledge lookup, dashboard note + `/api/state` over HTTP | ✅ free, fast |
 | 3 | `tests/llm/` | **Real LLM calls** — the `usable` gate, citation repair, MOC granularity | ❌ opt-in (`-m llm`) |
 
 `tests/conftest.py` puts `src/` on `sys.path` and provides `tmp_vault` (monkeypatches

@@ -350,6 +350,46 @@ reaches `llm._provider` — the single choke point, patched there rather than at
 
 ---
 
+## arXiv rate limiting — a lane that failed silently
+
+arXiv publishes a rate limit of **one request every 3 seconds** and enforces it by
+answering a burst with `429`s that carry no `Retry-After`. `search_arxiv` had no
+pacing and no retry, and the discovery loop's access pattern is precisely the burst
+that trips it: several searches issued in a single model turn, then a run of PDF
+downloads from the same host.
+
+**Why it was invisible.** A failed search doesn't raise — it returns
+`[{"error": ...}]`, which reaches the model as a string. To the agent that is
+indistinguishable from "arXiv has nothing on this topic", so it simply searches
+elsewhere. Nothing in the log, the dashboard or the run ledger records that the best
+academic lane is down. A comprehensive run on "Speculative Decoding for LLM
+Inference" — a topic that is *almost entirely* arXiv literature — made 16 searches,
+queued **zero** sources, and produced a report from one pre-existing clipping. The
+run was marked `done`.
+
+**The gate.** One process-wide pacer (`pace_arxiv`) spaces every arxiv.org request
+to `ARXIV_MIN_INTERVAL_SECS`, and `arxiv_get` retries a 429 with exponential backoff
+before giving up. Three details are deliberate:
+
+- **The lock is held across the sleep.** Two threads that computed their own wait
+  independently would wake together — the burst the pacer exists to prevent.
+- **Searches and PDF downloads share the gate**, including the full-text ladder's
+  arXiv route in `fulltext.py`. They draw on one per-host budget however the code is
+  factored, and a run downloads far more PDFs than it searches.
+- **Only a 429 or a transport error is retried.** A 404 on a withdrawn paper won't
+  reappear; retrying it just burns the budget that matters.
+
+Exhausting the attempts re-raises, and `search_arxiv` now **prints** before
+returning its error entry. The model still gets a graceful string — the run must not
+die because arXiv is busy — but "we were throttled" is no longer written into the
+log as "no results".
+
+The cost is wall-clock in a phase already dominated by model latency, not money.
+
+---
+
+---
+
 ## Duplicate prevention — the overnight-duplicates origin
 
 `clipper.py` checks for existing notes with the same `source` URL before processing
@@ -369,6 +409,62 @@ The linter's duplicate-source `--fix` chooses the keeper by `_clip_quality`
 tiebreaker**), not file age. The old "delete newest" rule dropped the good copy of
 a research duplicate — the abstract stub is written first, the full text indexed
 later.
+
+---
+
+## Prior knowledge — walking the MOC graph instead of flattening it
+
+Phase ① asks "what do I already know about this?". It used to answer that by
+flattening every MOC into one list of `(title, one-line summary)` and handing the
+whole thing to the model: **907 entries, ~194 KB, ~34k tokens** on a 900-note vault,
+and growing with every clip ever saved. The cheapest task in the pipeline was
+carrying its largest prompt, on the free tier least able to carry it.
+
+**How it failed.** A comprehensive run on 2026-08-12 sent 34,314 input tokens to
+`gemini-3.5-flash` and got **zero output tokens** back. `parse_json_response`
+returned nothing parseable, `find_relevant_clippings` returned `[]`, and the run
+carried on and wrote a full report — with no prior knowledge at all, and not one
+line anywhere saying so. The vault held `MOC - Sports Nutrition`, `MOC - Nootropics`
+and a related prior report; the report cited none of them. The identical prompt on
+DeepSeek V4 Flash answered correctly for $0.0036, so this was a capacity problem at
+that context size, not a prompt problem.
+
+**The fix is the structure that was already there.** MOCs *are* the vault's topic
+index — narrow sub-fields, named. So the lookup walks the graph rather than
+flattening it, in the two steps a person takes:
+
+1. `_shortlist_mocs(topic)` — pick the indexes worth opening from their **names
+   only** (~75 lines, ~2 KB).
+2. `_read_moc_catalog(only=shortlist)` — read the entries of just those MOCs, and
+   pick notes from that (typically a few dozen entries).
+
+Two small calls instead of one huge one, and the prompt size is now bounded by
+`MOC_SHORTLIST_MAX` × MOC size rather than by the vault.
+
+**Why the shortlist has two selectors.** The model judges *meaning*, which is
+required: "Time-Restricted Eating" belongs under `MOC - Metabolic Health`, a name it
+shares no word with, so a purely lexical filter would find nothing. But a purely
+model-driven filter reintroduces exactly the single point of failure this section is
+about — a spent quota or an empty response and the run is blind again. So a
+deterministic word-overlap pass stands behind it as a **fallback**, used only when
+the model returns nothing usable. A bad model day then costs precision, not all
+prior knowledge.
+
+A fallback and not a union, which was the first attempt: unioned, "Time-Restricted
+Eating" pulls in `MOC - Time Series` on the word "time" — measured against the real
+vault, the union added two MOCs whose notes could not be relevant and spent
+candidate slots on them. Words of three characters or fewer are ignored either way,
+so "the", "and", "in" match nothing.
+
+**And it says so now.** An unparseable pick used to be indistinguishable from
+"nothing is relevant" — both were a silent `[]`. Both paths print. The run still
+continues either way; prior knowledge is an improvement on a report, never a
+precondition for one.
+
+The whole-vault read is still there (`only=None`) for callers that genuinely want
+every note. Only the prior-knowledge lookup scopes itself.
+
+---
 
 ---
 
