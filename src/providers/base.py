@@ -64,15 +64,70 @@ class Provider(ABC):
         """Agentic function-calling loop. Returns the final text response."""
 
 
+# The escapes JSON actually defines. Anything else after a backslash is a parse
+# error — which is precisely what a LaTeX command is.
+_JSON_ESCAPES = set('"\\/bfnrtu')
+
+
+def repair_invalid_escapes(text: str) -> str:
+    r"""
+    Escape backslashes that don't begin a valid JSON escape sequence.
+
+    Clip analyses of papers carry maths, and a model writing `$\alpha$` or `\[ x \]`
+    into a JSON string emits an invalid escape: `json.loads` rejects the whole
+    response, `parse_json_response` returns {}, and the caller drops the document.
+    That accounted for 45 silently-lost sources in one month of the live log, and 9
+    of 29 attempts in the first full-text backfill run — full-text papers are the
+    worst case precisely because they are the ones with maths in them.
+
+    Only genuinely INVALID escapes are touched, so a response that already parses is
+    never rewritten. Note the asymmetry that leaves behind: `\beta`, `\theta`,
+    `\frac`, `\nu` and `\rho` ARE valid escapes (backspace, tab, formfeed, newline,
+    carriage return), so they parse cleanly while silently eating the command. Telling
+    those apart from an intended newline is not decidable from the text alone, so they
+    are deliberately left for the prompt to prevent — see DESIGN_NOTES § Math rendering.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = text[i + 1]
+        if nxt not in _JSON_ESCAPES:
+            out.append("\\\\")          # invalid escape -> a literal backslash
+            i += 1
+            continue
+        if nxt == "u" and not re.match(r"[0-9a-fA-F]{4}", text[i + 2:i + 6]):
+            out.append("\\\\")          # \u not followed by 4 hex digits
+            i += 1
+            continue
+        out.append(ch)
+        out.append(nxt)
+        i += 2
+    return "".join(out)
+
+
 def parse_json_response(text: str) -> dict:
     """
     Safely parse a JSON response from a model.
     Strips markdown fences if present.
+
+    Strict parsing is tried FIRST and the escape repair only on failure, so this can
+    add recoveries but can never change how an already-valid response is read. A
+    response truncated mid-structure stays unparseable, correctly — repair fixes
+    malformed escapes, not missing text.
     """
     text = (text or "").strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
     try:
         return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(repair_invalid_escapes(text))
     except json.JSONDecodeError:
         return {}
