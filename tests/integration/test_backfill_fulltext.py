@@ -261,3 +261,95 @@ class TestDriver:
         self._run(monkeypatch, tmp_vault, ["--limit", "2"],
                   lambda url, reference="", identifiers=None: ("", "miss"))
         assert "Candidates: 2" in capsys.readouterr().out
+
+
+class TestGlossExtraction:
+    """
+    The first version of this script took the analysis's first paragraph as the MOC
+    gloss. A clip analysis OPENS with a markdown heading, so 55 live MOC entries came
+    out reading `— ### Executive Summary`. These pin the shape of the fix.
+    """
+
+    ANALYSIS = (
+        "### Executive Summary\n\n"
+        "This study reports morbid risk of schizophrenia across three degrees of "
+        "relatedness.\n\n"
+        "### Key Ideas\n\n- Morbid risk\n\n"
+        "---\n\n## Original Content\n\nraw source text here"
+    )
+
+    def test_skips_the_leading_heading(self):
+        g = bf.gloss_from_analysis(self.ANALYSIS)
+        assert g.startswith("This study reports morbid risk")
+        assert "###" not in g and "Executive Summary" not in g
+
+    def test_ignores_original_content(self):
+        assert "raw source text" not in bf.gloss_from_analysis(self.ANALYSIS)
+
+    def test_is_a_single_line(self):
+        assert "\n" not in bf.gloss_from_analysis(self.ANALYSIS)
+
+    def test_skips_quotes_and_tables(self):
+        assert bf.gloss_from_analysis("> [!warning] x\n\n| a | b |\n\nReal prose here.") \
+            == "Real prose here."
+
+    def test_empty_analysis_yields_empty(self):
+        assert bf.gloss_from_analysis("") == ""
+        assert bf.gloss_from_analysis("### Only A Heading") == ""
+
+
+class TestGlossFormatting:
+    def test_entry_keeps_a_space_before_the_dash(self, tmp_vault, monkeypatch):
+        # `]]—` glues the dash to the link in Obsidian's rendering.
+        monkeypatch.setattr(bf, "INDEX_PATH", tmp_vault.INDEX_PATH)
+        moc = _moc_with(tmp_vault, "Some Note")
+        bf.refresh_moc_summary("Some Note", "A clean prose gloss.", dry_run=False)
+        _, body = notes.read_note(moc)
+        assert "- [[Some Note]] — A clean prose gloss." in body
+        assert "]]—" not in body
+
+    def test_heading_gloss_is_flattened_not_written_raw(self, tmp_vault, monkeypatch):
+        monkeypatch.setattr(bf, "INDEX_PATH", tmp_vault.INDEX_PATH)
+        moc = _moc_with(tmp_vault, "Some Note")
+        bf.refresh_moc_summary("Some Note", "### Executive Summary", dry_run=False)
+        _, body = notes.read_note(moc)
+        assert "###" not in body
+
+    def test_multiline_summary_never_breaks_the_entry(self, tmp_vault, monkeypatch):
+        # A MOC entry is one list item; a newline in it would split the list.
+        monkeypatch.setattr(bf, "INDEX_PATH", tmp_vault.INDEX_PATH)
+        moc = _moc_with(tmp_vault, "Some Note")
+        bf.refresh_moc_summary("Some Note", "line one\nline two", dry_run=False)
+        _, body = notes.read_note(moc)
+        entry = [l for l in body.splitlines() if l.startswith("- [[Some Note]]")]
+        assert len(entry) == 1 and "line one line two" in entry[0]
+
+
+class TestRefreshGlossesMode:
+    def test_repairs_a_damaged_entry_without_touching_note_count(self, tmp_vault, monkeypatch):
+        monkeypatch.setattr(bf, "INBOX_PATH", tmp_vault.INBOX_PATH)
+        monkeypatch.setattr(bf, "INDEX_PATH", tmp_vault.INDEX_PATH)
+        path = _abstract_clip(tmp_vault, "Backfilled Note", backfilled=True, full_text=True)
+        notes.write_note(path, notes.read_note(path)[0],
+                         "### Executive Summary\n\nGenuine prose summary.\n")
+        moc = tmp_vault.INDEX_PATH / "MOC - Schizophrenia.md"
+        notes.write_note(moc, {"moc": True, "topic": "Schizophrenia", "note_count": 1},
+                         "# X\n\n## Notes\n- [[Backfilled Note]]— ### Executive Summary\n")
+
+        bf.refresh_glosses(apply=True)
+
+        fm, body = notes.read_note(moc)
+        assert "- [[Backfilled Note]] — Genuine prose summary." in body
+        assert fm["note_count"] == 1
+
+    def test_dry_run_writes_nothing(self, tmp_vault, monkeypatch):
+        monkeypatch.setattr(bf, "INBOX_PATH", tmp_vault.INBOX_PATH)
+        monkeypatch.setattr(bf, "INDEX_PATH", tmp_vault.INDEX_PATH)
+        path = _abstract_clip(tmp_vault, "Backfilled Note", backfilled=True)
+        notes.write_note(path, notes.read_note(path)[0], "### H\n\nProse.\n")
+        moc = _moc_with(tmp_vault, "Backfilled Note")
+        before = moc.read_bytes()
+
+        bf.refresh_glosses(apply=False)
+
+        assert moc.read_bytes() == before
