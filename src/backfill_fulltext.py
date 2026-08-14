@@ -143,6 +143,28 @@ def _titles_overlap(a: str, b: str, threshold: float = 0.6) -> bool:
 
 # ── MOC gloss refresh ─────────────────────────────────────────────────────────
 
+def gloss_from_analysis(body: str) -> str:
+    """
+    Derive a one-line MOC gloss from a clip's analysis.
+
+    A clip analysis opens with a markdown heading (`### Executive Summary`), so the
+    naive "first paragraph" is the heading itself — which is how 55 MOC entries ended
+    up reading `— ### Introduction and Objectives`. Skip heading lines, take the first
+    real prose line, and put it through `indexer.one_line`, which is the single place
+    that knows how to flatten and clamp a MOC entry (AGENTS.md: entry summaries are
+    one line, always).
+    """
+    from indexer import one_line
+
+    analysis = (body or "").split("## Original Content")[0]
+    for line in analysis.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ">", "|", "---", "```")):
+            continue
+        return one_line(line)
+    return ""
+
+
 def refresh_moc_summary(stem: str, summary: str, dry_run: bool) -> str:
     """
     Update the one-line gloss on this note's EXISTING MOC entry, wherever it is.
@@ -165,8 +187,13 @@ def refresh_moc_summary(stem: str, summary: str, dry_run: bool) -> str:
         if not pattern.search(body):
             continue
         if not dry_run:
-            one = summary.replace("\n", " ").strip()
-            write_note(moc_path, fm, pattern.sub(lambda m: f"{m.group(1)}— {one}", body))
+            from indexer import one_line
+            one = one_line(summary)
+            if not one:
+                return ""
+            # " — ", with the spaces: the MOC entry format is `- [[Title]] — gloss`,
+            # and `]]—` glues the dash to the link in Obsidian's rendering.
+            write_note(moc_path, fm, pattern.sub(lambda m: f"{m.group(1)} — {one}", body))
         return moc_path.stem
     return ""
 
@@ -219,6 +246,64 @@ def upgrade(path: Path, text: str, route: str, ids: dict) -> tuple[bool, str]:
     return True, route
 
 
+# ── Gloss repair ──────────────────────────────────────────────────────────────
+
+def backfilled_clips(only: str = "") -> list[Path]:
+    """Clips this script has already upgraded."""
+    out = []
+    for path in sorted(INBOX_PATH.glob("*.md")):
+        try:
+            fm, _ = read_note(path)
+        except Exception:
+            continue
+        if fm.get("backfilled") and (not only or only.lower() in path.stem.lower()):
+            out.append(path)
+    return out
+
+
+def refresh_glosses(apply: bool = False, only: str = "") -> int:
+    """
+    Recompute the MOC gloss for every already-backfilled clip.
+
+    Repairs the entries written by the first version of this script, which took the
+    analysis's first paragraph as the gloss — and a clip analysis opens with a
+    markdown heading, so 55 MOC entries came out reading `— ### Executive Summary`,
+    glued to the link by a missing space. Purely local: reads each clip's stored
+    analysis, no network and no model calls, and idempotent so it can be re-run.
+    """
+    clips = backfilled_clips(only)
+    print("=" * 72)
+    print(f"MOC gloss refresh — {'APPLY' if apply else 'DRY RUN'}")
+    print(f"Backfilled clips: {len(clips)}")
+    print("=" * 72)
+
+    fixed = skipped = 0
+    for i, path in enumerate(clips, 1):
+        try:
+            _, body = read_note(path)
+        except Exception:
+            skipped += 1
+            continue
+        gloss = gloss_from_analysis(body)
+        if not gloss:
+            print(f"[{i:>3}/{len(clips)}] --   {path.stem[:48]} — no usable gloss")
+            skipped += 1
+            continue
+        moc = refresh_moc_summary(path.stem, gloss, dry_run=not apply)
+        if moc:
+            print(f"[{i:>3}/{len(clips)}] {'OK  ' if apply else 'WOULD'} "
+                  f"{path.stem[:44]:46} {moc} — {gloss[:60]}")
+            fixed += 1
+        else:
+            skipped += 1
+
+    print("=" * 72)
+    print(f"{'Refreshed' if apply else 'Would refresh'}: {fixed}   skipped: {skipped}")
+    if not apply and fixed:
+        print("\nRe-run with --refresh-glosses --apply to write them.")
+    return 0
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -231,7 +316,13 @@ def main() -> int:
     ap.add_argument("--resolve-titles", action="store_true",
                     help="for clips with no identifier, try to resolve one from the "
                          "title (lower precision; still gated)")
+    ap.add_argument("--refresh-glosses", action="store_true",
+                    help="recompute MOC glosses for already-backfilled clips and exit "
+                         "(no network, no model calls)")
     args = ap.parse_args()
+
+    if args.refresh_glosses:
+        return refresh_glosses(apply=args.apply, only=args.only)
 
     clips = abstract_only_clips(args.only)
     if args.limit:
@@ -295,8 +386,8 @@ def main() -> int:
         ok, detail = upgrade(path, text, route, ids)
         if ok:
             summary_fm, summary_body = read_note(path)
-            gloss = summary_body.split("\n\n")[0][:200]
-            moc = refresh_moc_summary(path.stem, gloss, dry_run=False)
+            moc = refresh_moc_summary(path.stem, gloss_from_analysis(summary_body),
+                                      dry_run=False)
             print(f"[{i:>3}/{len(clips)}] OK    {path.stem[:52]} — {len(text):,} chars "
                   f"via {detail}" + (f" (gloss refreshed in {moc})" if moc else ""))
             recovered += 1
