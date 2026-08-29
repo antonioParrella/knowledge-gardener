@@ -493,58 +493,16 @@ now print the DOI on its own line so the agent can pass it straight through.
 ## Development Workflow
 
 `main` is the **deployed** branch. The watchdog runs whatever is checked out in
-the working tree (`python src/obsidian_watchdog.py` imports the `.py` files from
-disk at start-up — not a committed or pushed revision), so `main` must stay green
-and runnable at all times. Do work on short-lived branches and merge back only
-once the suite passes:
-
-1. **Branch off main:** `git switch -c fix/<slug>` (or `feat/<slug>`).
-2. **Make the change**, keeping commits focused, and add/adjust tests — a change
-   to a `str → str` helper or a routing/gate decision should land with a Tier 1/2
-   test (see Testing).
-3. **Run `pytest`** — Tiers 1 + 2 must pass; reach for `-m llm` after touching a
-   prompt or model route.
-4. **Merge to main and push:** `git switch main && git merge <branch> && git push`.
-5. **Restart the watchdog from main** so the running process matches the deployed
-   branch — never leave it running a half-merged working tree. Because the running
-   code is the working tree, a merge only takes effect on the next restart.
-
-Keep it lightweight — this is a solo project, so the point is only that `main`
-stays runnable and every change lands with its tests, not heavyweight git-flow.
+the working tree, not a committed or pushed revision, so `main` must stay green
+and runnable at all times. For the branch, test, merge and watchdog-restart
+procedure, see `.agents/skills/dev-workflow/SKILL.md`.
 
 ---
 
 ## Testing
 
-A pytest safety net lives in `tests/` (repo root). `pytest.ini` sets
-`addopts = -m "not llm"` so a bare `pytest` never spends money. Install test deps
-with `pip install -r requirements-dev.txt`.
-
-```
-pytest                # Tiers 1 + 2 (Tier 3 auto-deselected)
-pytest tests/unit     # just Tier 1
-pytest -m llm         # Tier 3 only — real LLM, costs money, needs API keys
-```
-
-| Tier | Folder | What | In default run? |
-|------|--------|------|-----------------|
-| 1 | `tests/unit/` | Pure `str → str` logic: math normalisation, tag hygiene, wikilink repair, completeness gate, note naming, depth parsing, concept linking, MOC helpers, the callout edit contract + correction gates, identifier extraction + the full-text identity/structure gates, the arXiv rate-limit gate, the run ledger + dashboard note render | ✅ free, ~0.5s |
-| 2 | `tests/integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault`): note round-trips, source dedup, MOC surgery, clip pipeline with the **LLM mocked**, the three-attempt source cascade with the **network mocked**, the MOC-graph prior-knowledge lookup, dashboard note + `/api/state` over HTTP | ✅ free, fast |
-| 3 | `tests/llm/` | **Real LLM calls** — the `usable` gate, citation repair, MOC granularity | ❌ opt-in (`-m llm`) |
-
-`tests/conftest.py` puts `src/` on `sys.path` and provides `tmp_vault` (monkeypatches
-the config path constants into every module that imported them). It also has an
-**autouse** `isolate_telemetry` fixture that redirects the run ledger to a tmp dir
-and mutes ntfy for every test — without it, any test touching a pipeline function
-would write run state (and push notifications) from the live vault. `tests/llm/`
-adds `require_openrouter` / `require_gemini_or_openrouter`, which skip cleanly when
-the key is absent.
-
-**Reach for Tier 3 after touching a prompt or model route:** edit
-`clip_analysis.md`/`clip_system.md` → `test_usable_gate.py`; edit
-`research_correct.md` or the edit-tool schema → `test_callout_corrections.py`; edit
-`research_repair_links.md` or synthesis routing → `test_citation_integrity.py`; edit
-the MOC-assignment prompt → `test_moc_granularity.py`.
+For the tier map, free default suite and required real-LLM checks after prompt or
+route changes, see `.agents/skills/run-tests/SKILL.md`.
 
 ---
 
@@ -552,31 +510,13 @@ the MOC-assignment prompt → `test_moc_granularity.py`.
 
 ### Vault linting
 
-```
-python src/lint.py           # full report to console
-python src/lint.py --quiet   # only print if issues found (for scheduled runs)
-python src/lint.py --fix     # auto-fix what can be fixed
-```
-
-Scans the vault without the Gemini API. Detects: duplicate source URLs, broken YAML,
-MOC `note_count` mismatch, orphan wikilinks, duplicate MOC entries, empty-body notes,
-stale `_index.md` references, and unrendered LaTeX math. `--fix` resolves duplicate
-sources (keeper chosen by `_clip_quality`, not age), orphan/duplicate MOC entries,
-`note_count`, stale index refs, and math delimiters.
+For commands, checks and the supported `--fix` changes, see
+`.agents/skills/vault-lint/SKILL.md`.
 
 ### One-off backfills (reviewable: dry-run, then `--apply`)
 
-| Script | Purpose |
-|--------|---------|
-| `reset_clips.py` | Revert processed clips to original (for re-indexing under new MOC/prompt rules). `--dry-run` to preview. |
-| `clean_junk_clips.py` | Purge junk clips (raw-PDF byte dumps, bot-wall interstitials) saved before the `usable` gate, and fix MOCs. |
-| `consolidate_tags.py` | Unify drifted tags → canonical vocabulary. Proposes `tag_map.json`, apply after review. |
-| `fix_math_delimiters.py` | Rewrite LaTeX `\(…\)`/`\[…\]` → Obsidian `$…$`/`$$…$$` in reports written before the guard existed. |
-| `reconceptualize.py` | Re-extract concepts from reports conceptualized while the extractor only saw their first 15k chars. `--only <substr>` for one report. `--apply` queues paid generation runs — dry-run first. |
-| `backfill_fulltext.py` | Retry full-text retrieval for clips that settled for an abstract before the OA ladder existed, and re-analyse the ones it recovers. `--limit N` / `--only <substr>` to scope, `--resolve-titles` to also try resolving an identifier from the title (lower precision, still gated), `--apply` to commit. |
-
-These are one-time migrations, not part of the live pipeline — see the relevant
-DESIGN_NOTES section for what each was cleaning up.
+For the migration list, scope controls and dry-run/apply cautions, see
+`.agents/skills/run-backfill/SKILL.md`.
 
 ---
 
