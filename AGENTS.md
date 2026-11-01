@@ -31,8 +31,9 @@ Both the clip and research pipelines maintain **MOC notes** (Maps of Content) �
 topic-based index notes the agent builds and updates automatically, so it builds on
 prior knowledge rather than starting from scratch each time.
 
-Total cost: **$0** on free tiers (Tavily + Gemini free; arXiv + OpenAlex need no key;
-OpenRouter is cents and only used for report synthesis).
+Clips and indexing use free Gemini when available; OpenRouter bills discovery,
+report writing/review and paid fallbacks. Per-stage actual charges are recorded
+in the ledger; see LLM Routing below.
 
 ---
 
@@ -41,7 +42,7 @@ OpenRouter is cents and only used for report synthesis).
 | Component       | Choice                          | Why                                      |
 |-----------------|---------------------------------|------------------------------------------|
 | Sync            | Obsidian Sync (vault on local disk) | Understands Obsidian's write patterns; iCloud shredded `.obsidian/` (see DESIGN_NOTES § Sync) |
-| AI              | Gemini Flash (free) + OpenRouter | Per-task routing; synthesis on DeepSeek V4 Pro via OpenRouter |
+| AI              | Gemini Flash (free) + OpenRouter | Per-task routing; Sonnet final reports/review, cheaper DeepSeek helpers |
 | Trigger         | Python watchdog on Surface      | Monitors vault for new notes             |
 | Academic search | arXiv + OpenAlex (no key)       | Real papers with full-text PDFs          |
 | Full text       | PyMuPDF / pypdf                 | Extracts paper PDFs to text              |
@@ -200,8 +201,9 @@ again by an unreliable title search.
 **④ Synthesise** (`synthesis._synthesise`) — builds an **unnumbered** source index
 of exact `[[wikilink]]` titles and writes the report. Related prior reports are
 passed as a distinct block. standard/deep = single draft; comprehensive = draft →
-critique → revise. All synthesis runs OpenRouter-only (task `synthesis`, never
-Gemini). Citations are then repaired (`synthesis._repair_wikilinks`), math
+critique → revise. All writing runs OpenRouter-only: `report` for single-pass reports,
+or `report_draft` → `critique` → `revision` for comprehensive reports (never Gemini).
+Citations are then repaired (`synthesis._repair_wikilinks`), math
 delimiters normalised, and a report cut off mid-generation is rejected by
 `_assert_report_complete()` before anything is written — the trigger stays pending
 and retries. (Why unnumbered, why OpenRouter-only, why the gates: DESIGN_NOTES §
@@ -232,7 +234,7 @@ Add `> [!research] your question` anywhere in **any** note. On the next rescan,
 5. Replaces the marker with the answer block, rendered by `render_answer_block()`
    — inline like a review comment, no separate note created.
 
-**The answer is always DeepSeek V4 Pro, never Gemini** (synthesis is OpenRouter-only;
+**The final answer is always Sonnet 5.5, never Gemini** (synthesis is OpenRouter-only;
 only source *discovery* can fall back to Gemini, and it never writes the answer).
 
 **A callout is often an objection, not a question.** "This is wrong because…"
@@ -426,18 +428,36 @@ Calls are routed per task through `llm.py` using the `ROUTING` map in `config.py
 Each task has an ordered chain of `(provider, model, opts)`; the router tries each
 in turn, falling through on quota exhaustion or provider errors.
 
-| Task (call site) | Primary | Fallback |
-|------------------|---------|----------|
-| `clip` — clip/PDF summaries (`clipper.py`, `pdf_processor.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
-| `moc` — MOC assignment + relevance + concept extract + question restatement (`indexer.py`, `concepts.py`, `callouts.py`) | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
-| `research` — discovery tool loop only (`pipeline.py`, `concepts.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
-| `synthesis` — the report: draft/critique/revise/repair, and the correction loop (`synthesis.py`, `concepts.py`, `corrections.py`) | DeepSeek V4 Pro, max reasoning (OpenRouter) | **none — OpenRouter only** |
+| Task | Primary | Fallback |
+|------|---------|----------|
+| `clip`, `moc` | Gemini 3.8 Flash, high (free) | DeepSeek V4.1 Flash 1017, high |
+| `research` — discovery only | DeepSeek V4.1 Flash 1017, high | Gemini 3.8 Flash, high |
+| `report_draft` — comprehensive initial draft | Current DeepSeek V4 Pro, xhigh | none |
+| `report` — standard/deep final text | Sonnet 5.5, xhigh | none |
+| `critique` | Sonnet 5.5, xhigh | none |
+| `revision` | Sonnet 5.5, high | none |
+| `correction` — exact-match edit loop | Sonnet 5.5, xhigh | none |
+| `citation_repair`, `concept` | Current DeepSeek V4 Pro, xhigh | none |
 
-The report itself (`synthesis`) runs on DeepSeek V4 Pro at `reasoning={"effort":
-"xhigh"}` with an explicit `max_tokens` (`RESEARCH_MAX_OUTPUT_TOKENS`) and has **no
-Gemini fallback** — if OpenRouter is unavailable the run fails and retries rather
-than producing a lower-tier report. Adding a provider or re-routing a task is a
-one-line edit to `ROUTING`. `thinking_level` is `high` on every Gemini call.
+Every writing route is OpenRouter-only. Long Sonnet report stages allow 64,000
+tokens for reasoning plus final text; DeepSeek helpers and corrections retain
+32,000. The live trial exhausted 32,000 during xhigh critique before its audit
+finished, so this extra headroom is deliberate and its actual charge is logged.
+Revision uses high effort: a live xhigh rewrite exhausted even 64,000 tokens.
+The xhigh audit supplies the logical findings; the rewrite applies them without
+repeating the whole investigation or expanding for its own sake.
+A failed comprehensive review must retry;
+it does not publish the inexpensive draft. `synthesis` remains a compatibility
+alias for external callers, but internal calls use the separate tasks above.
+Reasoning effort support is model-specific: October Flash accepts `high`/`max`,
+Sonnet accepts `xhigh`; do not send April Pro options indiscriminately.
+Ask Note's separate plugin configuration is unchanged.
+
+The discovery/writing prompts explicitly compare plausible hypotheses against
+discriminating observations and evidence gaps. Critique produces an actionable
+argument audit; revision resolves its material findings using supplied evidence.
+It must not fabricate data or turn missing evidence into disproof. Concept and
+citation-repair prompts retain their existing roles.
 
 **Provider exhaustion is handled in two places.** A spent quota or OpenRouter
 key/credit cap raises `QuotaExhausted`, which the router parks on a
@@ -450,12 +470,21 @@ reading also clears the cooldown). It fails open on an unreachable/uncapped key 
 a blip can't wedge research. Why both, and how they reconcile: DESIGN_NOTES §
 Provider exhaustion.
 
-Concept notes add no new routes: conceptualization runs on `moc`, the concept
-discovery loop reuses `research`, and the explainer reuses `synthesis`.
+Concept extraction runs on `moc`, concept discovery reuses `research`, and the
+explainer uses the separate inexpensive `concept` route.
 
-Every OpenRouter request carries `usage: {include: true}`, so the response returns
-that call's real charge in `usage.cost`; the router books it against the task in
-`telemetry.py`, which is what makes per-report cost visible on the dashboard.
+Every OpenRouter request carries `usage: {include: true}`. Telemetry records
+actual charge, task, pipeline phase/detail, run ID, model, request effort/output
+ceiling, response ID and available endpoint/cache/reasoning-token metadata.
+Missing usage details remain null, and missing cost is flagged as unreported.
+Gemini total output includes thinking tokens as well as answer tokens.
+A Gemini 503 capacity error puts that model on a five-minute cooldown and uses
+the fallback immediately; requests have a three-minute timeout, and server-side
+deadline failures use the same cooldown. Daily quota exhaustion keeps its policy.
+Clip calls request provider-enforced JSON objects; mixed MOC tasks retain their
+existing object/array response contracts.
+The preflight reserve is $3.00 in both the key cap and purchased-credit pools;
+it is a start gate, not a guaranteed per-run spending limit.
 
 ### Free Tier Limits
 
@@ -542,7 +571,7 @@ the key is absent.
 
 **Reach for Tier 3 after touching a prompt or model route:** edit
 `clip_analysis.md`/`clip_system.md` → `test_usable_gate.py`; edit
-`research_correct.md` or the edit-tool schema → `test_callout_corrections.py`; edit
+`research_correct.md` or the edit-tool schema → `test_correction_tool_live.py`; edit
 `research_repair_links.md` or synthesis routing → `test_citation_integrity.py`; edit
 the MOC-assignment prompt → `test_moc_granularity.py`.
 

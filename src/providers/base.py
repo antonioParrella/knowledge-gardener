@@ -43,6 +43,11 @@ class ProviderError(Exception):
     """Raised on an unrecoverable model/provider error — the router falls through."""
 
 
+class ProviderUnavailable(ProviderError):
+    """Temporary capacity outage: use a fallback and probe this model later."""
+    retry_after = 300
+
+
 class Provider(ABC):
     """Common interface every LLM provider implements."""
 

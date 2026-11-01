@@ -8,6 +8,8 @@ Most questions add material rather than overturning it. "What about the evidence
 
 Edit only when the answer genuinely contradicts, refutes, or materially qualifies something the document asserts. A claim the answer shows to be unsupported, an effect attributed to the wrong cause, a conclusion the new sources overturn.
 
+Check the argument as well as the isolated fact: a true observation may not establish the claimed cause, a necessary condition may not be sufficient, and competing explanations may predict the same observation. Correct unsupported implication or certainty using only the researched answer and supplied evidence. Distinguish a refuted claim from one that remains unproven; do not invent missing premises or change a defensible disagreement merely to make the note agree with the answer. The same exact-match and minimal-edit restrictions below apply to logical corrections.
+
 ## How to edit
 
 Call `edit_note(old_string, new_string, why)` once per passage.

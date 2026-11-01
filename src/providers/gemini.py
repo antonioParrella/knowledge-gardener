@@ -12,11 +12,14 @@ import time
 from google.genai import Client
 from google.genai import types
 
-from config import GEMINI_API_KEY, GEMINI_THINKING_LEVEL
+from config import GEMINI_API_KEY, GEMINI_THINKING_LEVEL, GEMINI_REQUEST_TIMEOUT_SECS
 from telemetry import push_usage
-from .base import Provider, QuotaExhausted, ProviderError, safe_print
+from .base import Provider, QuotaExhausted, ProviderError, ProviderUnavailable, safe_print
 
-client = Client(api_key=GEMINI_API_KEY)
+client = Client(api_key=GEMINI_API_KEY, http_options={
+    "timeout": GEMINI_REQUEST_TIMEOUT_SECS * 1000,
+    "retry_options": {"attempts": 1},  # the provider/router owns retry policy
+})
 
 _RPM_WAIT_SECS = 60
 _MAX_RPM_RETRIES = 3
@@ -31,7 +34,10 @@ def _classify(err: Exception):
             return QuotaExhausted(msg)
         return None  # RPM limit — caller should wait and retry
     if "503" in msg or "UNAVAILABLE" in msg:
-        return None  # transient — wait and retry
+        return ProviderUnavailable(msg)  # avoid waiting repeatedly per source during capacity outages
+    if ("timeout" in type(err).__name__.lower() or "timed out" in low
+            or "504" in msg or "deadline_exceeded" in low or "deadline expired" in low):
+        return ProviderUnavailable(f"Gemini request timed out: {msg}")
     return ProviderError(msg)
 
 
@@ -50,15 +56,19 @@ def _record_usage(response, model: str) -> None:
     Report a completed call to telemetry (never raises).
 
     Cost is always 0.0: these models run on the free tier. What actually
-    constrains us is the *request* count against the 1,500/day cap, so the
-    dashboard tracks calls, and tokens for context.
+    constrains us is the project's per-model free request quota, so the dashboard
+    tracks calls and total tokens, including thinking when reported.
     """
     try:
         meta = getattr(response, "usage_metadata", None)
         push_usage(
             "gemini", model, cost=0.0,
             prompt_tokens=getattr(meta, "prompt_token_count", 0) or 0,
-            completion_tokens=getattr(meta, "candidates_token_count", 0) or 0,
+            completion_tokens=(getattr(meta, "candidates_token_count", 0) or 0)
+                              + (getattr(meta, "thoughts_token_count", 0) or 0),
+            reasoning_tokens=getattr(meta, "thoughts_token_count", None),
+            cached_tokens=getattr(meta, "cached_content_token_count", None),
+            response_id=getattr(response, "response_id", None),
         )
     except Exception:
         pass
@@ -95,9 +105,11 @@ class GeminiProvider(Provider):
     def simple(self, prompt: str, system: str = "", model: str | None = None, **opts) -> str:
         for attempt in range(_MAX_RPM_RETRIES):
             try:
-                cfg = {"thinking_config": {"thinking_level": GEMINI_THINKING_LEVEL}}
+                cfg = {"thinking_config": {"thinking_level": opts.get("thinking_level", GEMINI_THINKING_LEVEL)}}
                 if system:
                     cfg["system_instruction"] = system
+                if opts.get("json_mode"):
+                    cfg["response_mime_type"] = "application/json"
                 if opts.get("max_tokens"):
                     cfg["max_output_tokens"] = opts["max_tokens"]
                 response = client.models.generate_content(
@@ -130,7 +142,7 @@ class GeminiProvider(Provider):
             "system_instruction": system,
             "tools": [{"function_declarations": tool_schema}],
             "automatic_function_calling": {"disable": True},
-            "thinking_config": {"thinking_level": GEMINI_THINKING_LEVEL},
+            "thinking_config": {"thinking_level": opts.get("thinking_level", GEMINI_THINKING_LEVEL)},
         }
         if opts.get("max_tokens"):
             cfg["max_output_tokens"] = opts["max_tokens"]

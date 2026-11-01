@@ -5,8 +5,9 @@ The pipeline calls `llm_simple` / `llm_tool_loop` with a `task` ("clip", "moc",
 "research"). The router looks up that task's chain in config.ROUTING and tries
 each (provider, model, opts) in order, falling through on QuotaExhausted /
 ProviderError (which also covers an unconfigured OpenRouter key). This keeps free
-Gemini on the high-volume cheap tasks and routes research to DeepSeek V4 Pro
-(via OpenRouter) at max reasoning — see AGENTS.md for the rationale.
+Gemini on the high-volume tasks, October DeepSeek Flash on discovery, and Sonnet
+on final reports/review/corrections. Draft, concept and citation helpers retain
+the inexpensive Pro route — see AGENTS.md for the full table.
 
 `parse_json_response` is re-exported here so call sites have a single import.
 """
@@ -44,9 +45,9 @@ def _clear_cooldown(prov_name: str) -> None:
         del _cooldown_until[key]
 
 
-# Preflight result cache: (expiry_epoch, ok, reason). The /key poll is shared
+# Preflight result cache: (expiry_epoch, ok, reason, reserve). The /key poll is shared
 # across a whole rescan batch instead of run per note.
-_preflight_cache: tuple[float, bool, str] | None = None
+_preflight_cache: tuple[float, bool, str, float] | None = None
 
 
 def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[bool, str]:
@@ -75,7 +76,8 @@ def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[b
         return True, ""
 
     now = time.time()
-    if _preflight_cache and now < _preflight_cache[0]:
+    if (_preflight_cache and now < _preflight_cache[0]
+            and _preflight_cache[3] == min_credits):
         return _preflight_cache[1], _preflight_cache[2]
 
     from providers.openrouter import key_status, account_balance
@@ -105,7 +107,7 @@ def research_preflight(min_credits: float = RESEARCH_MIN_KEY_CREDITS) -> tuple[b
         # Live evidence the key is usable: every conclusive reading is solvent.
         _clear_cooldown("openrouter")
 
-    _preflight_cache = (now + PREFLIGHT_CACHE_SECS, ok, reason)
+    _preflight_cache = (now + PREFLIGHT_CACHE_SECS, ok, reason, min_credits)
     return ok, reason
 
 
@@ -151,13 +153,16 @@ def _run(task: str, invoke):
                   f"cooling down {QUOTA_COOLDOWN_SECS}s, trying next")
             last_error = e
         except ProviderError as e:
+            retry_after = getattr(e, "retry_after", 0)
+            if retry_after:
+                _cooldown_until[(prov_name, model)] = time.time() + retry_after
             print(f"[llm] {prov_name}/{model} unavailable for '{task}': {e} — trying next")
             last_error = e
         finally:
             # Providers buffer each call's cost/tokens; only here do we know which
             # task they served. In `finally` so a failed attempt's spend is booked
             # too — a truncated synthesis still costs money and must show up.
-            telemetry.flush_usage(task)
+            telemetry.flush_usage(task, request_opts=opts)
     raise RuntimeError(f"All providers failed for task '{task}': {last_error}")
 
 

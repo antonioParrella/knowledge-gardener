@@ -25,7 +25,8 @@ for _stream in (sys.stdout, sys.stderr):
 # conflicted every write to .obsidian/ (1,200+ "workspace N.json" copies, and a
 # canonical community-plugins.json that never survived), which disabled plugins
 # and made the phone crawl. Keep the vault off any file-level sync service.
-VAULT_PATH   = Path(r"C:\Users\parre\Obsidian\Knowledge Garden")
+# Explicit override for isolated test/trial vaults; every derived path follows it.
+VAULT_PATH   = Path(os.environ.get("KG_VAULT_PATH", r"C:\Users\parre\Obsidian\Knowledge Garden"))
 
 INBOX_PATH    = VAULT_PATH / "Clippings"       # Web Clipper saves here
 RESEARCH_PATH = VAULT_PATH / "Research"   # Agent research summaries
@@ -55,6 +56,9 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 GEMINI_THINKING_LEVEL = "high"  # "minimal" | "low" | "medium" | "high"
+# Free-tier capacity can leave a request hanging without a response. Cheap tasks
+# have a paid fallback; do not let one request stall the unattended queue forever.
+GEMINI_REQUEST_TIMEOUT_SECS = 180
 
 # When a model raises QuotaExhausted (daily free-tier cap hit, or an OpenRouter
 # key/credit cap), the router marks it as cooling down for this long and skips it
@@ -69,10 +73,10 @@ QUOTA_COOLDOWN_SECS = 1800  # 30 minutes
 # credit via GET /api/v1/key. If the key has a spend cap set and fewer than this
 # many dollars remain, the run is BLOCKED before it gathers sources — the trigger
 # stays pending and auto-resumes on a later rescan once the cap is raised or usage
-# resets, rather than doing all the discovery work then dying at synthesis. A
-# single comprehensive run on DeepSeek V4 Pro at xhigh reasoning can cost roughly
-# this much; tune to about one run's cost. Set 0 to disable preflight blocking.
-RESEARCH_MIN_KEY_CREDITS = 0.20  # US dollars
+# resets, rather than doing all the discovery work then dying at synthesis.
+# Reserve for a comprehensive draft + Sonnet critique/revision. This is a start
+# gate, not a hard per-run spend cap. Set 0 to disable preflight blocking.
+RESEARCH_MIN_KEY_CREDITS = 3.00  # USD reserve for a comprehensive Sonnet review/revision run
 # The /key reading is cached this long so one rescan batch polls once, not per
 # note. Kept at the rescan interval so a restored limit is seen within one cycle.
 PREFLIGHT_CACHE_SECS = 60
@@ -82,19 +86,13 @@ PREFLIGHT_CACHE_SECS = 60
 # (provider, model, opts); the router (llm.py) tries each in turn, falling
 # through on quota exhaustion / errors. Keep the cheap/free option first.
 #
-#   clip / moc → two free Gemini models first (each has its own daily free-tier
-#                bucket, so stacking them ~doubles free headroom), then DeepSeek
-#                V4 Flash via OpenRouter (better than Flash-Lite, no quota cliff)
-#                for ~cents. The quota circuit breaker in llm.py makes the
-#                gemini→gemini→openrouter hop instant once a bucket is spent.
-#   research   → DeepSeek V4 Pro at max reasoning via OpenRouter (frontier-class,
-#                ~1/15th Opus cost), falling back to the free Gemini models.
-# Reasoning opt is OpenRouter's normalized effort (minimal/low/medium/high/xhigh;
-# "xhigh" = max — OpenRouter rejects the literal "max").
-GEMINI_FLASH_35 = "gemini-3.5-flash"
-GEMINI_FLASH    = "gemini-3-flash-preview"
-OR_FLASH        = "deepseek/deepseek-v4-flash"
+# clip/moc use free Gemini 3.8, then October DeepSeek Flash. Discovery uses
+# October Flash, then Gemini. Reasoning support is model-specific: Flash accepts
+# high/max, Sonnet accepts xhigh, and the April Pro retains xhigh.
+GEMINI_FLASH    = "gemini-3.8-flash"
+OR_FLASH        = "deepseek/deepseek-v4.1-flash-1017"
 OR_PRO          = "deepseek/deepseek-v4-pro"
+OR_SONNET       = "anthropic/claude-sonnet-5.5"
 
 # Explicit output ceiling for report synthesis. Comprehensive reports run to many
 # thousands of words; relying on a provider's *default* output cap is how a report
@@ -102,6 +100,9 @@ OR_PRO          = "deepseek/deepseek-v4-pro"
 # a ceiling we chose (and can see in logs), not a hidden default. Passed as
 # `max_tokens` (OpenRouter) / `max_output_tokens` (Gemini) via the routing opts.
 RESEARCH_MAX_OUTPUT_TOKENS = 32000
+# Xhigh Sonnet exhausted 32k during a real audit. Allow 64k for long reports;
+# revision uses high after an xhigh rewrite spent 63k on reasoning alone.
+SONNET_MAX_OUTPUT_TOKENS = 64000
 
 # The same discipline applied to the cheap tasks. clip/moc normally run on free
 # Gemini, so their OpenRouter entry is a rarely-exercised fallback that only fires
@@ -126,35 +127,38 @@ RESEARCH_MAX_OUTPUT_TOKENS = 32000
 # ceiling must sit well above that. An earlier 16,000 would have truncated that
 # very call — the ceiling has to clear the real distribution's tail, not its mean.
 CHEAP_MAX_OUTPUT_TOKENS = 32000
-OR_CHEAP_OPTS = {"max_tokens": CHEAP_MAX_OUTPUT_TOKENS}
+OR_CHEAP_OPTS = {"max_tokens": CHEAP_MAX_OUTPUT_TOKENS, "reasoning_effort": "high"}
+OR_PRO_OPTS = {"reasoning_effort": "xhigh", "max_tokens": RESEARCH_MAX_OUTPUT_TOKENS}
+OR_SONNET_OPTS = {"reasoning_effort": "xhigh", "max_tokens": SONNET_MAX_OUTPUT_TOKENS}
+OR_SONNET_REVISION_OPTS = {"reasoning_effort": "high", "max_tokens": SONNET_MAX_OUTPUT_TOKENS}
+OR_SONNET_EDIT_OPTS = {"reasoning_effort": "xhigh", "max_tokens": RESEARCH_MAX_OUTPUT_TOKENS}
 
 ROUTING = {
     "clip": [
-        ("gemini",     GEMINI_FLASH_35, {}),
-        ("gemini",     GEMINI_FLASH,    {}),
-        ("openrouter", OR_FLASH,        OR_CHEAP_OPTS),
+        ("gemini",     GEMINI_FLASH,    {"thinking_level": "high", "json_mode": True}),
+        ("openrouter", OR_FLASH,        {**OR_CHEAP_OPTS, "json_mode": True}),
     ],
     "moc": [
-        ("gemini",     GEMINI_FLASH_35, {}),
-        ("gemini",     GEMINI_FLASH,    {}),
+        ("gemini",     GEMINI_FLASH,    {"thinking_level": "high"}),
         ("openrouter", OR_FLASH,        OR_CHEAP_OPTS),
     ],
     # Discovery tool loop only — it gathers sources that become Gemini-processed
     # clippings, so a Gemini fallback here is acceptable when OpenRouter is down.
     "research": [
-        ("openrouter", OR_PRO,          {"reasoning_effort": "xhigh"}),
-        ("gemini",     GEMINI_FLASH_35, {}),
-        ("gemini",     GEMINI_FLASH,    {}),
+        ("openrouter", OR_FLASH,        OR_CHEAP_OPTS),
+        ("gemini",     GEMINI_FLASH,    {"thinking_level": "high", "max_tokens": CHEAP_MAX_OUTPUT_TOKENS}),
     ],
-    # The report itself — draft, critique, revise, citation repair. OpenRouter
-    # ONLY: research reports must always be written and reviewed by DeepSeek V4
-    # Pro, never Gemini. If OpenRouter is unavailable the synthesis call raises,
-    # the run fails, and the trigger stays pending to retry later — which is far
-    # better than committing a lower-tier report as if it were the real thing.
-    "synthesis": [
-        ("openrouter", OR_PRO, {"reasoning_effort": "xhigh",
-                                "max_tokens": RESEARCH_MAX_OUTPUT_TOKENS}),
-    ],
+    # Writing/editing stays OpenRouter-only. A failed premium review retries
+    # rather than silently publishing the inexpensive initial draft.
+    "report_draft": [("openrouter", OR_PRO, OR_PRO_OPTS)],
+    "report": [("openrouter", OR_SONNET, OR_SONNET_OPTS)],
+    "critique": [("openrouter", OR_SONNET, OR_SONNET_OPTS)],
+    "revision": [("openrouter", OR_SONNET, OR_SONNET_REVISION_OPTS)],
+    "correction": [("openrouter", OR_SONNET, OR_SONNET_EDIT_OPTS)],
+    "citation_repair": [("openrouter", OR_PRO, OR_PRO_OPTS)],
+    "concept": [("openrouter", OR_PRO, OR_PRO_OPTS)],
+    # Compatibility alias; the pipeline uses the explicit writing tasks above.
+    "synthesis": [("openrouter", OR_SONNET, OR_SONNET_OPTS)],
 }
 
 # ── Academic search endpoints (no API key required) ─────────────────────────────

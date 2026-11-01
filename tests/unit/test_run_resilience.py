@@ -45,7 +45,9 @@ def test_cheap_tasks_do_not_throttle_reasoning():
     for task in ("clip", "moc"):
         for provider, _model, opts in config.ROUTING[task]:
             if provider == "openrouter":
-                assert "reasoning_effort" not in opts
+                # October Flash defaults to high; retaining it explicitly does
+                # not throttle reasoning or send April-only xhigh to this model.
+                assert opts.get("reasoning_effort", "high") in {"high", "max"}
 
 
 def test_the_cheap_cap_clears_the_observed_tail():

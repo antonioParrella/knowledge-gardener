@@ -7,7 +7,7 @@ actually breaks, not coverage for its own sake. Three tiers:
 |------|--------|------|------|-----------------|
 | 1 | `unit/` | Pure `str → str` logic: math-delimiter normalisation, tag hygiene, wikilink repair, report-completeness gate, note naming, depth parsing, concept linking, MOC helpers | free, ~0.5s | ✅ |
 | 2 | `integration/` | Filesystem behaviour against a throwaway vault (`tmp_vault` fixture): note round-trips, source dedup, MOC surgery, and the clip pipeline with the **LLM mocked** | free, fast | ✅ |
-| 3 | `llm/` | **Real LLM calls** — the judgments that can't be mocked: the `usable` gate, citation repair, MOC granularity | a few cents, slow | ❌ opt-in |
+| 3 | `llm/` | **Real LLM calls** — the judgments that can't be mocked: the `usable` gate, citation repair, MOC granularity and gated Sonnet corrections | a few cents, slow | ❌ opt-in |
 
 ## Running
 
@@ -30,7 +30,9 @@ Run it deliberately after touching a **prompt** or **model route** — those are
 changes unit tests can't catch:
 
 - edited `prompts/clip_analysis.md` or `clip_system.md` → `test_usable_gate.py`
-- edited `research_repair_links.md` or synthesis routing → `test_citation_integrity.py`
+- edited report routes/prompts → `test_writing_routes.py` and the isolated real report trial
+- edited `research_correct.md` or correction routing → `test_correction_tool_live.py`
+- edited `research_repair_links.md` or citation routing → `test_citation_integrity.py`
 - edited `moc_assign*.md` → `test_moc_granularity.py`
 
 ## Conventions

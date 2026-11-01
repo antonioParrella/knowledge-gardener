@@ -6,8 +6,8 @@ OpenRouter is a single OpenAI-wire gateway to many models, so this uses the
 (e.g. "deepseek/deepseek-v4-pro"). Two OpenRouter specifics are handled here:
 
   - Reasoning: OpenRouter normalizes reasoning into a `reasoning` object
-    (extra_body), e.g. {"reasoning": {"effort": "xhigh"}}. Valid efforts are
-    minimal/low/medium/high/xhigh — NOT "max" (rejected). Do NOT also send the
+    (extra_body), e.g. {"reasoning": {"effort": "xhigh"}}. Supported efforts
+    depend on the selected model (including max on newer models). Do NOT also send the
     flat `reasoning_effort` field; sending both 400s.
   - reasoning round-trip: across tool-call turns OpenRouter expects the assistant
     message's `reasoning_details` (preferred) or `reasoning` echoed back, or the
@@ -146,6 +146,8 @@ def _completion_kwargs(opts: dict) -> dict:
     max_tokens = opts.get("max_tokens")
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
+    if opts.get("json_mode"):
+        kwargs["response_format"] = {"type": "json_object"}
     return kwargs
 
 
@@ -157,9 +159,14 @@ def _record_usage(resp, model: str) -> None:
             return
         push_usage(
             "openrouter", model,
-            cost=_get_field(usage, "cost") or 0.0,
+            cost=_get_field(usage, "cost"),
             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            cached_tokens=_get_field(_get_field(usage, "prompt_tokens_details"), "cached_tokens"),
+            cache_write_tokens=_get_field(_get_field(usage, "prompt_tokens_details"), "cache_write_tokens"),
+            reasoning_tokens=_get_field(_get_field(usage, "completion_tokens_details"), "reasoning_tokens"),
+            response_id=_get_field(resp, "id"),
+            endpoint_provider=_get_field(resp, "provider"),
         )
     except Exception:
         pass
@@ -195,6 +202,8 @@ def _check_complete(choice, model):
 
 def _get_field(msg, key):
     """Read a field that may be a typed attr or an extra (unknown) field on the SDK model."""
+    if isinstance(msg, dict):
+        return msg.get(key)
     val = getattr(msg, key, None)
     if val is None:
         extra = getattr(msg, "model_extra", None)

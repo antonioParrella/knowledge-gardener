@@ -192,3 +192,9 @@ def test_result_is_cached(monkeypatch):
     llm.research_preflight(min_credits=0.20)
     llm.research_preflight(min_credits=0.20)
     assert calls["n"] == 1  # second call served from cache
+
+
+def test_small_reserve_cache_cannot_admit_a_larger_reserve(monkeypatch):
+    _stub(monkeypatch, key={"limit_remaining": 1.0}, balance=1.0)
+    assert llm.research_preflight(min_credits=.20)[0] is True
+    assert llm.research_preflight(min_credits=3.0)[0] is False

@@ -201,6 +201,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Private vault snapshots and real-model evaluation artifacts.
+artifacts/model-trials/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

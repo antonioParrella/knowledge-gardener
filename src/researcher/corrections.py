@@ -295,7 +295,7 @@ def apply_corrections(question: str, answer: str, body: str,
                 system=load_prompt("research_correct"),
                 tool_schema=TOOL_SCHEMA,
                 tool_executor=execute_tool,
-                task="synthesis",          # OpenRouter-only: never let a fallback edit the vault
+                task="correction",         # OpenRouter-only; exact-match gates still decide write-back
                 max_iterations=MAX_CALLOUT_EDITS + 3,
             )
         except Exception as e:

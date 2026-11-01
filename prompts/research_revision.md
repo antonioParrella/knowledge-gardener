@@ -1,0 +1,7 @@
+Revise the report to resolve every material finding in the reviewer audit. Preserve useful detail and the research brief's scope. For each central argument, make the evidence, assumptions and inference explicit; compare plausible alternatives using observations that distinguish them, and revise the conclusion when its premises fail.
+
+Use only the supplied evidence. Where a reviewer requests unavailable data, narrow the claim or state the evidence gap instead of inventing an answer. Do not incorporate a reviewer assertion uncritically: if the supplied evidence does not support it, explain the remaining uncertainty in the relevant passage. Preserve calibrated uncertainty rather than making the report artificially decisive.
+
+Keep all citations to the exact wikilink titles from the source index. Address corrections throughout the report, including the executive conclusion, so no obsolete claim contradicts its later correction. Preserve mathematical and source-format requirements. Return only the complete revised report in Markdown, not the review or an editing log.
+
+Use the completed audit to direct the rewrite instead of redoing discovery or exhaustively re-deriving every supplied source. Keep the report near the draft's length where it already covers the brief; expand only material evidence or explanation gaps. Depth comes from explicit, supported reasoning, not repeated qualifications or an ever-longer document. Consolidate repeated arguments and prioritise the central conclusions.

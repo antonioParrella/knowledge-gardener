@@ -400,7 +400,10 @@ def record_key_status(status: dict | None, balance: float | None = None) -> None
 # ── Cost & usage ─────────────────────────────────────────────────────────────────
 
 def push_usage(provider: str, model: str, cost: float | None = None,
-               prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+               prompt_tokens: int = 0, completion_tokens: int = 0, *,
+               cached_tokens: int | None = None, reasoning_tokens: int | None = None,
+               cache_write_tokens: int | None = None, response_id: str | None = None,
+               endpoint_provider: str | None = None) -> None:
     """
     Called by a provider once per completed API call.
 
@@ -416,6 +419,13 @@ def push_usage(provider: str, model: str, cost: float | None = None,
             "cost": float(cost) if cost else 0.0,
             "prompt_tokens": int(prompt_tokens or 0),
             "completion_tokens": int(completion_tokens or 0),
+            # None means the API did not report this, not a measured zero.
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "response_id": response_id,
+            "endpoint_provider": endpoint_provider,
+            "cost_reported": cost is not None,
         })
     except Exception:
         pass
@@ -428,18 +438,22 @@ def take_usage() -> list[dict]:
     return buf
 
 
-def flush_usage(task: str) -> None:
+def flush_usage(task: str, request_opts: dict | None = None) -> None:
     """Attribute buffered provider usage to a task, the current run, and the ledger."""
     try:
         for u in take_usage():
             _record_call(task, u["provider"], u["model"], u["cost"],
-                         u["prompt_tokens"], u["completion_tokens"])
+                         u["prompt_tokens"], u["completion_tokens"],
+                         details={k: v for k, v in u.items() if k not in
+                                  {"provider", "model", "cost", "prompt_tokens", "completion_tokens"}},
+                         request_opts=request_opts)
     except Exception:
         pass
 
 
 def _record_call(task: str, provider: str, model: str, cost: float,
-                 prompt_tokens: int, completion_tokens: int) -> None:
+                 prompt_tokens: int, completion_tokens: int, *,
+                 details: dict | None = None, request_opts: dict | None = None) -> None:
     with _lock:
         record = _state.get("current")
         if record:
@@ -457,9 +471,14 @@ def _record_call(task: str, provider: str, model: str, cost: float,
         _bump_daily("tokens_out", completion_tokens)
         _persist()
 
+    opts = request_opts or {}
     _event("llm", task=task, provider=provider, model=model,
            cost_usd=round(cost, 6), tokens_in=prompt_tokens,
-           tokens_out=completion_tokens, run=(record or {}).get("title"))
+           tokens_out=completion_tokens, run=(record or {}).get("title"),
+           run_id=(record or {}).get("id"), phase=(record or {}).get("phase"),
+           detail=(record or {}).get("detail"),
+           reasoning_effort=opts.get("reasoning_effort") or opts.get("thinking_level"),
+           max_tokens=opts.get("max_tokens"), **(details or {}))
 
 
 def record_api(name: str, n: int = 1) -> None:
