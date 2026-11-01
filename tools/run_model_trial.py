@@ -1,7 +1,8 @@
 """Opt-in paid comparison in a copied vault; source vault is never written.
 
-Stages: prepare, full, control, judge, summary. Saved results prevent duplicate
-spend. Artifacts include private notes and must not be committed/published.
+Stages cover snapshotting, research, checkpoint recovery, paired writing,
+indexing, blind judging and accounting. Saved results prevent duplicate spend.
+Artifacts include private notes and must not be committed/published.
 """
 import argparse
 import hashlib
@@ -266,6 +267,41 @@ def finish(args, out, telemetry):
     print("Completed real trigger write-back, indexing and concept extraction from saved completed research.")
 
 
+def revise(args, out, telemetry):
+    """Resume a failed long rewrite using the actual completed draft and audit."""
+    if (out / "new.md").exists():
+        raise RuntimeError("Final report already exists")
+    from researcher import synthesis
+    from config import load_prompt
+    from notes import normalize_math_delimiters
+    draft = read(out / "calls" / "new-01-report_draft.json")
+    critique = read(out / "calls" / "new-02-critique.json")
+    inputs = read(out / "synthesis-input.json")
+    real_simple = synthesis.llm_simple
+    count = len(list((out / "calls").glob("new-*.json")))
+    def trace(**kwargs):
+        nonlocal count
+        count += 1
+        path = out / "calls" / f"new-{count:02d}-{kwargs['task']}-resumed.json"
+        save(path, kwargs)
+        result = real_simple(**kwargs)
+        save(path, {**kwargs, "output": result})
+        return result
+    synthesis.llm_simple = trace
+    with telemetry.run("research", TOPIC + " — resumed revision"):
+        telemetry.phase("synthesis")
+        report = synthesis._revise_report(draft["prompt"], draft["output"], critique["output"],
+                    load_prompt(inputs.get("system_name", "research_synthesis")))
+        valid = {s["title"] for s in inputs["sources"]}
+        valid |= {s["title"] for s in inputs.get("prior_research", [])}
+        telemetry.phase("citations")
+        report = synthesis._repair_wikilinks(report, valid)
+        report = normalize_math_delimiters(report, escape_currency=True)
+        synthesis._assert_report_complete(report, TOPIC)
+    (out / "new.md").write_text(report, encoding="utf-8")
+    print("Completed resumed production revision and integrity gates.")
+
+
 def evidence_for_judges(out):
     sources = {s["title"]: s for s in read(out / "synthesis-input.json")["sources"]}
     historical = (out / "historical.md").read_text(encoding="utf-8")
@@ -353,7 +389,7 @@ def summary(args, out, telemetry):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("stage", choices=["prepare", "full", "complete", "write", "finish", "control", "judge", "summary"])
+    p.add_argument("stage", choices=["prepare", "full", "complete", "write", "revise", "finish", "control", "judge", "summary"])
     p.add_argument("--vault", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--env-file")

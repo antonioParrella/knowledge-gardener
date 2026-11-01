@@ -73,7 +73,7 @@ QUOTA_COOLDOWN_SECS = 1800  # 30 minutes
 # credit via GET /api/v1/key. If the key has a spend cap set and fewer than this
 # many dollars remain, the run is BLOCKED before it gathers sources — the trigger
 # stays pending and auto-resumes on a later rescan once the cap is raised or usage
-# resets, rather than doing all the discovery work then dying at synthesis. A
+# resets, rather than doing all the discovery work then dying at synthesis.
 # Reserve for a comprehensive draft + Sonnet critique/revision. This is a start
 # gate, not a hard per-run spend cap. Set 0 to disable preflight blocking.
 RESEARCH_MIN_KEY_CREDITS = 3.00  # USD reserve for a comprehensive Sonnet review/revision run
@@ -100,8 +100,8 @@ OR_SONNET       = "anthropic/claude-sonnet-5.5"
 # a ceiling we chose (and can see in logs), not a hidden default. Passed as
 # `max_tokens` (OpenRouter) / `max_output_tokens` (Gemini) via the routing opts.
 RESEARCH_MAX_OUTPUT_TOKENS = 32000
-# Xhigh Sonnet can spend most of 32k on reasoning before returning its audit.
-# A real comprehensive trial hit that ceiling; allow room for the answer too.
+# Xhigh Sonnet exhausted 32k during a real audit. Allow 64k for long reports;
+# revision uses high after an xhigh rewrite spent 63k on reasoning alone.
 SONNET_MAX_OUTPUT_TOKENS = 64000
 
 # The same discipline applied to the cheap tasks. clip/moc normally run on free
@@ -130,6 +130,7 @@ CHEAP_MAX_OUTPUT_TOKENS = 32000
 OR_CHEAP_OPTS = {"max_tokens": CHEAP_MAX_OUTPUT_TOKENS, "reasoning_effort": "high"}
 OR_PRO_OPTS = {"reasoning_effort": "xhigh", "max_tokens": RESEARCH_MAX_OUTPUT_TOKENS}
 OR_SONNET_OPTS = {"reasoning_effort": "xhigh", "max_tokens": SONNET_MAX_OUTPUT_TOKENS}
+OR_SONNET_REVISION_OPTS = {"reasoning_effort": "high", "max_tokens": SONNET_MAX_OUTPUT_TOKENS}
 OR_SONNET_EDIT_OPTS = {"reasoning_effort": "xhigh", "max_tokens": RESEARCH_MAX_OUTPUT_TOKENS}
 
 ROUTING = {
@@ -152,7 +153,7 @@ ROUTING = {
     "report_draft": [("openrouter", OR_PRO, OR_PRO_OPTS)],
     "report": [("openrouter", OR_SONNET, OR_SONNET_OPTS)],
     "critique": [("openrouter", OR_SONNET, OR_SONNET_OPTS)],
-    "revision": [("openrouter", OR_SONNET, OR_SONNET_OPTS)],
+    "revision": [("openrouter", OR_SONNET, OR_SONNET_REVISION_OPTS)],
     "correction": [("openrouter", OR_SONNET, OR_SONNET_EDIT_OPTS)],
     "citation_repair": [("openrouter", OR_PRO, OR_PRO_OPTS)],
     "concept": [("openrouter", OR_PRO, OR_PRO_OPTS)],

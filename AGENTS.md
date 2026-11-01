@@ -434,7 +434,8 @@ in turn, falling through on quota exhaustion or provider errors.
 | `research` — discovery only | DeepSeek V4.1 Flash 1017, high | Gemini 3.8 Flash, high |
 | `report_draft` — comprehensive initial draft | Current DeepSeek V4 Pro, xhigh | none |
 | `report` — standard/deep final text | Sonnet 5.5, xhigh | none |
-| `critique`, `revision` | Sonnet 5.5, xhigh | none |
+| `critique` | Sonnet 5.5, xhigh | none |
+| `revision` | Sonnet 5.5, high | none |
 | `correction` — exact-match edit loop | Sonnet 5.5, xhigh | none |
 | `citation_repair`, `concept` | Current DeepSeek V4 Pro, xhigh | none |
 
@@ -442,6 +443,9 @@ Every writing route is OpenRouter-only. Long Sonnet report stages allow 64,000
 tokens for reasoning plus final text; DeepSeek helpers and corrections retain
 32,000. The live trial exhausted 32,000 during xhigh critique before its audit
 finished, so this extra headroom is deliberate and its actual charge is logged.
+Revision uses high effort: a live xhigh rewrite exhausted even 64,000 tokens.
+The xhigh audit supplies the logical findings; the rewrite applies them without
+repeating the whole investigation or expanding for its own sake.
 A failed comprehensive review must retry;
 it does not publish the inexpensive draft. `synthesis` remains a compatibility
 alias for external callers, but internal calls use the separate tasks above.

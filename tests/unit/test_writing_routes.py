@@ -46,6 +46,8 @@ def test_premium_routes_have_no_lower_tier_fallback_and_helpers_stay_cheap():
     for task in ("report", "critique", "revision", "correction"):
         assert [(p, m) for p, m, _ in config.ROUTING[task]] == [("openrouter", config.OR_SONNET)]
     assert config.ROUTING["critique"][0][2]["max_tokens"] >= 64000
+    assert config.ROUTING["critique"][0][2]["reasoning_effort"] == "xhigh"
+    assert config.ROUTING["revision"][0][2]["reasoning_effort"] == "high"
     assert config.ROUTING["correction"][0][2]["max_tokens"] == 32000
     for task in ("report_draft", "citation_repair", "concept"):
         assert [(p, m) for p, m, _ in config.ROUTING[task]] == [("openrouter", config.OR_PRO)]

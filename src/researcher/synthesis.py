@@ -127,8 +127,13 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
         system=load_prompt("research_critique"),
         task="critique",
     )
+    return _revise_report(base, draft, critique, synthesis_system)
+
+
+def _revise_report(base: str, draft: str, critique: str, synthesis_system: str) -> str:
+    """Apply the completed argument audit with the separately budgeted reviser."""
     telemetry.set_detail("revising")
-    revised = llm_simple(
+    return llm_simple(
         task="revision",
         prompt=(
             f"{base}\n\n# Current draft\n{draft}\n\n"
@@ -137,7 +142,6 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
         ),
         system=synthesis_system,
     )
-    return revised
 
 
 # ── Citation integrity ───────────────────────────────────────────────────────────
