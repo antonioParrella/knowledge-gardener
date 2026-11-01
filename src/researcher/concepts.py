@@ -460,7 +460,7 @@ def _run_concept(term: str, context: str, source_title: str) -> str:
     concept_note = llm_simple(
         prompt=base,
         system=load_prompt("concept_synthesis"),
-        task="synthesis",
+        task="concept",
     )
 
     # Repair citations only when there is a source set to repair against; a

@@ -21,8 +21,11 @@ def _judge(content: str, url: str) -> dict:
     user = load_prompt("clip_analysis", source_url=url, content=content,
                        vocabulary="(none yet)")
     system = load_prompt("clip_system")
-    data = parse_json_response(llm_simple(prompt=user, system=system, task="clip"))
-    assert isinstance(data, dict), f"analyzer did not return JSON: {data!r}"
+    response = llm_simple(prompt=user, system=system, task="clip")
+    data = parse_json_response(response)
+    assert isinstance(data, dict) and isinstance(data.get("usable"), bool), \
+        f"analyzer did not return the required JSON fields: {response!r}"
+    assert isinstance(data.get("title"), str) and isinstance(data.get("content"), str)
     return data
 
 
@@ -34,6 +37,5 @@ def test_botwall_is_rejected(require_gemini_or_openrouter, fixture_text):
 
 def test_real_article_is_accepted(require_gemini_or_openrouter, fixture_text):
     data = _judge(fixture_text("article.txt"), "https://example.com/diffusion-intro")
-    # Absent or true both mean "process it" per clipper.py; only explicit false discards.
-    assert data.get("usable") is not False, \
+    assert data.get("usable") is True, \
         "a genuine article must not be discarded as unusable"

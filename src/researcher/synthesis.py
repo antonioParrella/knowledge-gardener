@@ -2,8 +2,8 @@
 Phase ④ — write the report and defend its integrity.
 
 Builds the synthesis prompt (an unnumbered source index, plus a distinct
-related-work block for prior research), calls the OpenRouter-only `synthesis`
-task (draft, or draft→critique→revise for comprehensive depth), then guards the
+related-work block for prior research), calls the distinct OpenRouter-only writing
+tasks (single report, or draft→critique→revision for comprehensive depth), then guards the
 result: citation repair (`[[21]]`-style dead links → real titles), fused-link
 normalisation, and a completeness gate that rejects a report cut off
 mid-generation. Shared by research runs and concept runs.
@@ -110,10 +110,12 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
             + prior_block
         )
 
-    # task="synthesis" routes to OpenRouter ONLY (never Gemini) — see config.ROUTING.
+    # Single-pass reports need the strong writer now; comprehensive runs get it
+    # at critique/revision, so their initial draft can remain inexpensive.
     synthesis_system = load_prompt(system_name)
     telemetry.set_detail("drafting")
-    draft = llm_simple(prompt=base, system=synthesis_system, task="synthesis")
+    draft = llm_simple(prompt=base, system=synthesis_system,
+                       task="report_draft" if depth == "comprehensive" else "report")
 
     if depth != "comprehensive":
         return draft
@@ -123,17 +125,15 @@ def _synthesise(topic: str, sources: list[dict], depth: str,
     critique = llm_simple(
         prompt=f"{base}\n\n# Draft report\n{draft}",
         system=load_prompt("research_critique"),
-        task="synthesis",
+        task="critique",
     )
     telemetry.set_detail("revising")
     revised = llm_simple(
-        task="synthesis",
+        task="revision",
         prompt=(
             f"{base}\n\n# Current draft\n{draft}\n\n"
             f"# Reviewer critique to address\n{critique}\n\n"
-            "Revise the report to address every point in the critique. Keep what works, "
-            "deepen what is thin, add missing material and counterarguments, and keep all "
-            "citations to the exact wikilink titles from the source index."
+            + load_prompt("research_revision")
         ),
         system=synthesis_system,
     )
@@ -209,7 +209,7 @@ def _repair_wikilinks(report: str, valid_titles: set[str]) -> str:
     title_list = "\n".join(f"- [[{t}]]" for t in sorted(valid_titles))
     try:
         repaired = llm_simple(
-            task="synthesis",
+            task="citation_repair",
             system=load_prompt("research_repair_links"),
             prompt=(
                 f"# Valid note titles\n{title_list}\n\n"

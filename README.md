@@ -11,7 +11,7 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 ## Stack
 
 - **Sync**: Obsidian Sync, vault on local disk (never a file-level sync service — see `AGENTS.md` § Setup Steps → Sync)
-- **AI**: per-task routing (`src/llm.py`) — free Gemini Flash for clips/MOCs (falling back to DeepSeek V4 Flash via OpenRouter when the daily quota is hit); research on DeepSeek V4 Pro at max reasoning via OpenRouter (falling back to free Gemini Flash)
+- **AI**: per-task routing (`src/llm.py`) — free Gemini 3.8 Flash for clips/MOCs; October DeepSeek Flash for discovery/fallbacks; Sonnet 5.5 for final reports, critique, revision and corrections; current DeepSeek Pro for comprehensive drafts, citation repair and concepts.
 - **Trigger**: Python watchdog on Surface
 - **Academic search**: arXiv + OpenAlex (no key needed); full-text PDFs via PyMuPDF
 - **Web search**: Tavily (free API key)
@@ -21,7 +21,7 @@ Both pipelines maintain Maps of Content (MOCs) — topic-based index notes the a
 
 1. Keep your Obsidian vault on local disk and sync it with Obsidian Sync (not iCloud/OneDrive/Dropbox)
 2. Get a Gemini API key from https://aistudio.google.com and set `GEMINI_API_KEY`
-3. Get an OpenRouter key from https://openrouter.ai/keys and set `OPENROUTER_API_KEY` (optional — without it everything runs on Gemini and research quality reverts to free Gemini Flash)
+3. Get an OpenRouter key from https://openrouter.ai/keys and set `OPENROUTER_API_KEY` (required for reports and corrections; clip/MOC processing can still use free Gemini)
 4. Get a free Tavily key from https://tavily.com and set `TAVILY_API_KEY` (optional — without it, research uses the academic sources only)
 5. Install dependencies: `pip install -r requirements.txt`
 6. Configure `src/config.py` with your vault path
@@ -71,15 +71,21 @@ On the next scan the agent researches it and replaces the callout **in place** w
 
 ### LLM routing & cost
 
-Calls are routed per task in `src/config.py` (`ROUTING`) through `src/llm.py`, which walks a fallback chain per task:
+See `src/config.py:ROUTING` and the task table in `AGENTS.md`. Standard/deep
+reports use Sonnet directly. Comprehensive reports use a cheaper DeepSeek Pro
+draft, then Sonnet critique and revision. The reviewer checks the argument
+against competing explanations and distinguishing observations. Source and
+citation integrity gates remain in place; premium writing has no cheap fallback.
 
-| Task | Primary | Fallback |
-|------|---------|----------|
-| clip / PDF summaries | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
-| MOC assignment | Gemini 3 Flash (free) | DeepSeek V4 Flash (OpenRouter) |
-| research (discovery + synthesis) | DeepSeek V4 Pro, max reasoning (OpenRouter) | Gemini 3 Flash (free) |
+The ledger records actual cost and token usage by task, plus available cache and
+reasoning details. Missing details are unknown, not assumed zero. Research checks
+for a $3 credit reserve before starting. Free Gemini quotas/capacity still limit
+throughput; October DeepSeek Flash is the paid fallback. Ask Note is unchanged.
 
-Free Gemini Flash carries the high-volume cheap tasks until its daily quota is hit, then DeepSeek V4 Flash (via OpenRouter) takes over with no quota cliff. Research runs on DeepSeek V4 Pro at max reasoning — frontier-class synthesis for ~$1–2/month at typical volume. Re-routing a task or adding a provider is a one-line edit to `ROUTING`.
+For an opt-in real comparison, use `tools/run_model_trial.py --help`. It copies
+Markdown into an isolated vault, preserves the historical report, runs new and
+old writing pipelines on identical evidence, and anonymises reports for two
+fresh judge models. It spends API credit; private artifacts are gitignored.
 
 ## MOCs: Specific Sub-Fields, Not Broad Domains
 
