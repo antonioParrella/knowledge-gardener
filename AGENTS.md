@@ -438,8 +438,11 @@ in turn, falling through on quota exhaustion or provider errors.
 | `correction` — exact-match edit loop | Sonnet 5.5, xhigh | none |
 | `citation_repair`, `concept` | Current DeepSeek V4 Pro, xhigh | none |
 
-Every writing route is OpenRouter-only, with an explicit 32,000-token ceiling
-covering reasoning plus final text. A failed comprehensive review must retry;
+Every writing route is OpenRouter-only. Long Sonnet report stages allow 64,000
+tokens for reasoning plus final text; DeepSeek helpers and corrections retain
+32,000. The live trial exhausted 32,000 during xhigh critique before its audit
+finished, so this extra headroom is deliberate and its actual charge is logged.
+A failed comprehensive review must retry;
 it does not publish the inexpensive draft. `synthesis` remains a compatibility
 alias for external callers, but internal calls use the separate tasks above.
 Reasoning effort support is model-specific: October Flash accepts `high`/`max`,

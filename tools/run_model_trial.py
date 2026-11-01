@@ -170,6 +170,102 @@ def control(args, out, telemetry):
     print("Completed old-code/old-prompt control on identical new evidence.")
 
 
+def complete(args, out, telemetry):
+    """Recover real keepers omitted by dedup during an interrupted trial resume."""
+    from notes import read_note
+    from researcher.sources import _load_existing, _process_source
+    final = out / "final-evaluation"
+    if (final / "synthesis-input.json").exists():
+        raise RuntimeError("Completed checkpoint already exists")
+    inputs = read(out / "synthesis-input.json")
+    included = {s["title"] for s in inputs["sources"]}
+    recovered = []
+    with telemetry.run("research", "Complete real discovery checkpoint"):
+        telemetry.phase("sources")
+        for entry in read(out / "discovered-sources.json"):
+            matches = []
+            for path in (out / "vault" / "Clippings").glob("*.md"):
+                fm, _ = read_note(path)
+                if fm.get("source") == entry["url"]:
+                    matches.append((path, fm))
+            processed = next((p for p, fm in matches if fm.get("processed") is True), None)
+            if processed and processed.stem in included:
+                continue
+            if processed:
+                result = _load_existing(processed)
+            else:
+                # An interrupted source can leave a pending stub. It must not be
+                # mistaken for a processed source by the vault's URL dedup check.
+                for path, fm in matches:
+                    assert path.resolve().is_relative_to((out / "vault").resolve())
+                    dest = out / "interrupted-stubs" / path.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.exists():
+                        raise RuntimeError(f"Stub archive collision: {dest.name}")
+                    path.rename(dest)
+                result = _process_source(entry)
+            if not result:
+                raise RuntimeError(f"Could not complete discovered keeper: {entry['url']}")
+            if result["title"] not in included:
+                inputs["sources"].append(result)
+                included.add(result["title"])
+                recovered.append({"url": entry["url"], "title": result["title"]})
+    final.mkdir(parents=True, exist_ok=True)
+    for name in ("baseline_synthesis.py", "historical.md", "brief.md", "manifest.json"):
+        shutil.copyfile(out / name, final / name)
+    for folder in ("baseline_prompts", "new_prompts", "vault"):
+        shutil.copytree(out / folder, final / folder)
+    save(final / "synthesis-input.json", inputs)
+    save(final / "checkpoint-completion.json", {"recovered": recovered,
+         "source_count": len(inputs["sources"]),
+         "note": "Actual discovery and source-processing charges are recorded in the parent trial. Both final writers use this identical completed bundle."})
+    print(f"Restored {len(recovered)} actual keepers; final source count {len(inputs['sources'])}.")
+
+
+def write(args, out, telemetry):
+    """Benchmark the production writer/gates on a completed source checkpoint."""
+    if (out / "new.md").exists():
+        raise RuntimeError("New writing result already exists")
+    from researcher import synthesis
+    from notes import normalize_math_delimiters
+    inputs = read(out / "synthesis-input.json")
+    real_simple = synthesis.llm_simple
+    count = 0
+    def trace(**kwargs):
+        nonlocal count
+        count += 1
+        path = out / "calls" / f"new-{count:02d}-{kwargs['task']}.json"
+        save(path, kwargs)
+        result = real_simple(**kwargs)
+        save(path, {**kwargs, "output": result})
+        return result
+    synthesis.llm_simple = trace
+    with telemetry.run("research", TOPIC + " — complete checkpoint"):
+        telemetry.phase("synthesis")
+        report = synthesis._synthesise(**inputs)
+        valid = {s["title"] for s in inputs["sources"]}
+        valid |= {s["title"] for s in inputs.get("prior_research", [])}
+        telemetry.phase("citations")
+        report = synthesis._repair_wikilinks(report, valid)
+        report = normalize_math_delimiters(report, escape_currency=True)
+        synthesis._assert_report_complete(report, TOPIC)
+    (out / "new.md").write_text(report, encoding="utf-8")
+    print("Completed production writing/review/citation/completeness gates on full checkpoint.")
+
+
+def finish(args, out, telemetry):
+    """Resume the trigger's real indexing/concept-extraction/write-back steps."""
+    from researcher import triggers
+    report = (out / "new.md").read_text(encoding="utf-8")
+    inputs = read(out / "synthesis-input.json")
+    # All preceding phase outputs are actual saved API results, not fabricated
+    # responses. Keep the raw paired report immutable for blind evaluation.
+    triggers._run_research = lambda *a, **k: (report, inputs["sources"])
+    triggers.process_research_trigger(out / "vault" / "_triggers" / f"{TOPIC}.md")
+    shutil.copyfile(out / "vault" / "Research" / "Trial - AI Company Viability.md", out / "new-indexed.md")
+    print("Completed real trigger write-back, indexing and concept extraction from saved completed research.")
+
+
 def evidence_for_judges(out):
     sources = {s["title"]: s for s in read(out / "synthesis-input.json")["sources"]}
     historical = (out / "historical.md").read_text(encoding="utf-8")
@@ -257,7 +353,7 @@ def summary(args, out, telemetry):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("stage", choices=["prepare", "full", "control", "judge", "summary"])
+    p.add_argument("stage", choices=["prepare", "full", "complete", "write", "finish", "control", "judge", "summary"])
     p.add_argument("--vault", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--env-file")
