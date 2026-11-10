@@ -13,7 +13,10 @@ import re
 from pathlib import Path
 
 from config import CLIP_CONTENT_LIMIT, VAULT_PATH, INBOX_PATH, SOURCES_PATH, load_prompt
-from notes import read_note, write_note, safe_filename, safe_rename, today, normalize_tags
+from notes import (
+    read_note, write_note, safe_filename, safe_rename, today, normalize_tags,
+    normalize_math_delimiters,
+)
 from llm import llm_simple, parse_json_response
 from indexer import index_note, format_tag_vocabulary
 import telemetry
@@ -174,7 +177,9 @@ def _analyse_clip(path: Path, fm: dict, body: str, source_url: str,
     clean_title = safe_filename(summary_title)
 
     tags = normalize_tags(data.get("tags", []))
-    analysis = data.get("content") or data.get("summary") or ""
+    analysis = normalize_math_delimiters(
+        data.get("content") or data.get("summary") or "", escape_currency=True,
+    )
     moc_summary = data.get("moc_summary") or ""
 
     # On re-index (clip was reset with preserve_title), keep the existing filename
