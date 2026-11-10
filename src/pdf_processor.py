@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import PDF_ARCHIVE_PATH, INBOX_PATH, CLIP_CONTENT_LIMIT, load_prompt
-from notes import write_note, safe_filename, today, normalize_tags
+from notes import write_note, safe_filename, today, normalize_tags, normalize_math_delimiters
 from llm import llm_simple, parse_json_response
 from indexer import index_note, format_tag_vocabulary
 import telemetry
@@ -104,7 +104,9 @@ def _process_pdf(path: Path):
     title = data.get("title", path.stem)
     clean_title = safe_filename(title)
     tags = normalize_tags(data.get("tags", []))
-    analysis = data.get("content") or data.get("summary") or ""
+    analysis = normalize_math_delimiters(
+        data.get("content") or data.get("summary") or "", escape_currency=True,
+    )
     moc_summary = data.get("moc_summary") or ""
 
     archive_dest = _archive_path_for(path)
